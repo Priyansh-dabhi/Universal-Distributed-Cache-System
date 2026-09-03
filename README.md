@@ -15,7 +15,7 @@ A lightweight distributed in-memory caching system built in Go.
 ## Planned Eviction Policies
 
 * LRU (Implemented)
-* LFU (Planned)
+* LFU (Implemented)
 * 2Q (Planned)
 
 ## Planned Architecture
@@ -24,47 +24,71 @@ Client → Router → Cache Nodes
 
 ## Status
 
-🚧 In active development — Phase 1 & Phase 2 complete
-
-- **Phase 1 — Basic In-Memory Cache**: Implemented
-- **Phase 2 — LRU Eviction**: Implemented
-
----
-
-## Phase 1 — Basic In-Memory Cache
-
-Implemented:
-
-- SET
-- GET
-- DELETE
-- Size tracking
-- Concurrent access protection
-- Unit tests
+```text
+Phase 1 — Basic In-Memory Cache       ✓
+Phase 2 — LRU Eviction               ✓
+Phase 3 — LFU Eviction               ✓
+Phase 4 — 2Q                          Planned
+```
 
 ---
 
-## Phase 2 — LRU Eviction Policy
+## Eviction Policies Overview
 
-### What is LRU?
-**LRU (Least Recently Used)** is a cache eviction algorithm that discards the least recently accessed items first when the cache reaches its configured maximum capacity. Every successful `GET` and `SET` operation marks the targeted item as the most recently used (MRU).
+### LRU (Least Recently Used)
+Removes the item that has not been used recently. Every successful `GET` or `SET` moves the item to the MRU (Most Recently Used) position.
 
-### Why an Eviction Policy is Needed
-In-memory caches operate within bounded memory constraints. Without an eviction policy, continuously adding entries causes unbounded memory consumption and eventual out-of-memory (OOM) crashes. An eviction policy ensures the cache maintains a fixed working set of the most relevant items.
+### LFU (Least Frequently Used)
+Removes the item that has been used the fewest times across its lifetime in cache. Every access (`GET` or `SET` update) increments the item's access counter.
 
-### Why HashMap + Doubly Linked List?
-- **HashMap (`map[string]*node`)**: Provides $O(1)$ average-time lookup for any key.
-- **Doubly Linked List**: Maintains recency ordering. Placing the MRU item at the head and the LRU item at the tail allows:
-  - Moving an accessed/updated node to the front in $O(1)$ time.
-  - Evicting the least recently used node from the tail in $O(1)$ time.
-  - Removing a deleted node in $O(1)$ time without scanning.
+### LFU Tie-Breaking
+When multiple entries share the same lowest access frequency, eviction tie-breaking is resolved using **LRU among equally frequent items**—the least recently accessed item within that frequency bucket is evicted first.
 
-### Time Complexity
+---
 
-| Operation | Complexity | Description |
-| --------- | :--------: | ----------- |
-| **GET**   |   $O(1)$   | Hash map lookup + move node to MRU head |
-| **SET**   |   $O(1)$   | Hash map lookup/insert + move/add to MRU head + optional LRU tail eviction |
-| **DELETE**|   $O(1)$   | Hash map deletion + unlink node from doubly linked list |
-| **Eviction**| $O(1)$   | Unlink tail.prev node and delete from hash map |
-| **Size**  |   $O(1)$   | Reading map length |
+## Major Data Structures
+
+### LRU Architecture
+- **HashMap (`map[string]*lruNode`)**: $O(1)$ key lookup.
+- **Doubly Linked List**: Maintains recency order between sentinel `head` (MRU) and `tail` (LRU).
+
+### LFU Architecture
+- **HashMap (`map[string]*lfuNode`)**: $O(1)$ key-to-node lookup.
+- **Frequency Buckets (`map[int]*lfuList`)**: Maps each access frequency to an ordered doubly linked list of items.
+  - New/updated items are prepended at the head (MRU within that frequency).
+  - The tail (`tail.prev`) holds the least recently accessed item with that frequency (enabling $O(1)$ LRU tie-breaking).
+- **`minFreq` Counter**: Tracks the minimum non-empty frequency bucket for $O(1)$ eviction candidate selection without scanning.
+
+---
+
+## Time Complexity
+
+| Operation | Expected Complexity | Description |
+| :--- | :---: | :--- |
+| **GET** | $O(1)$ average | Map lookup + node recency/frequency update |
+| **SET** | $O(1)$ average | Map lookup/insert + node insertion + optional eviction |
+| **DELETE** | $O(1)$ average | Map removal + unlinking from linked list / frequency bucket |
+| **Frequency update** | $O(1)$ average | Unlinking from bucket $f$ and prepending to bucket $f+1$ |
+| **Eviction** | $O(1)$ average | Removing `tail.prev` of `freqBuckets[minFreq]` |
+| **Size** | $O(1)$ | Querying map length |
+
+---
+
+## Phase Summary
+
+### Phase 1 — Basic In-Memory Cache
+- Core key-value store (`SET`, `GET`, `DELETE`, `Size`)
+- Thread safety via internal `sync.RWMutex`
+- Comprehensive unit tests
+
+### Phase 2 — LRU Eviction
+- Configurable maximum capacity and error validation
+- Doubly linked list for $O(1)$ recency promotion and eviction
+- Concurrency protection across readers and writers
+
+### Phase 3 — LFU Eviction
+- Frequency tracking (initial frequency 1, increment on GET and SET updates)
+- Frequency buckets with $O(1)$ promotions
+- Deterministic LRU tie-breaking within identical frequency tiers
+- Dynamic `minFreq` tracking for $O(1)$ evictions
+- Full test coverage for eviction, tie-breaking, capacity, and concurrency
