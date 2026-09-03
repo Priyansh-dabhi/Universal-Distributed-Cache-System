@@ -16,6 +16,19 @@ func mustNew(t *testing.T, capacity int) *Cache {
 	return c
 }
 
+func mustNewLFU(t *testing.T, capacity int) *Cache {
+	t.Helper()
+	c, err := NewLFU(capacity)
+	if err != nil {
+		t.Fatalf("unexpected error creating LFU cache: %v", err)
+	}
+	return c
+}
+
+// -----------------------------------------------------------------------------
+// Phase 1 & Phase 2 LRU Tests (Preserved)
+// -----------------------------------------------------------------------------
+
 // Test 1 — Set and Get
 func TestSetAndGet(t *testing.T) {
 	c := mustNew(t, 10)
@@ -247,11 +260,9 @@ func TestLRUDeleteRemovesMetadata(t *testing.T) {
 		t.Fatalf("expected size 2 after deleting 'B', got %d", c.Size())
 	}
 
-	// Verify doubly linked list integrity by traversing head to tail
-	for curr := c.head.next; curr != c.tail; curr = curr.next {
-		if curr.key == "B" {
-			t.Fatalf("found deleted key 'B' still present in linked list")
-		}
+	// Verify doubly linked list integrity
+	if c.ContainsInLRUList("B") {
+		t.Fatalf("found deleted key 'B' still present in linked list")
 	}
 
 	// Add new elements to trigger eviction and ensure no panic or corruption
@@ -338,7 +349,18 @@ func TestInvalidCapacity(t *testing.T) {
 	}
 }
 
-// Test 8 — Concurrent access with LRU operations
+// Test Unsupported Policy
+func TestUnsupportedPolicy(t *testing.T) {
+	c, err := NewWithPolicy(5, EvictionPolicy("RANDOM"))
+	if c != nil {
+		t.Fatalf("expected nil cache for unsupported policy")
+	}
+	if !errors.Is(err, ErrUnsupportedPolicy) {
+		t.Fatalf("expected ErrUnsupportedPolicy, got %v", err)
+	}
+}
+
+// Test Concurrent Access (LRU)
 func TestConcurrentAccess(t *testing.T) {
 	capacity := 20
 	c := mustNew(t, capacity)
@@ -400,8 +422,314 @@ func TestConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 
-	// Final sanity check: size must never exceed capacity
 	if c.Size() > capacity {
 		t.Fatalf("final size %d exceeded capacity %d", c.Size(), capacity)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Phase 3 LFU Tests
+// -----------------------------------------------------------------------------
+
+// LFU Test 1 — Basic LFU eviction
+func TestLFUBasicEviction(t *testing.T) {
+	c := mustNewLFU(t, 3)
+
+	c.Set("A", "1")
+	c.Set("B", "2")
+	c.Set("C", "3")
+
+	// Access frequencies:
+	// A: 1 (set) + 2 (gets) = 3
+	c.Get("A")
+	c.Get("A")
+
+	// C: 1 (set) + 1 (get) = 2
+	c.Get("C")
+
+	// B has freq 1 (only set)
+	// Now SET D should evict B (lowest frequency)
+	c.Set("D", "4")
+
+	if _, ok := c.Get("B"); ok {
+		t.Fatalf("expected 'B' to be evicted as least frequently used")
+	}
+
+	for _, key := range []string{"A", "C", "D"} {
+		if _, ok := c.Get(key); !ok {
+			t.Fatalf("expected key %q to exist in LFU cache", key)
+		}
+	}
+}
+
+// LFU Test 2 — Frequency increments
+func TestLFUFrequencyIncrements(t *testing.T) {
+	c := mustNewLFU(t, 3)
+
+	c.Set("A", "100")
+	freq, ok := c.GetFrequency("A")
+	if !ok || freq != 1 {
+		t.Fatalf("expected initial frequency 1, got %d (ok=%v)", freq, ok)
+	}
+
+	c.Get("A")
+	c.Get("A")
+	c.Get("A")
+
+	freq, ok = c.GetFrequency("A")
+	if !ok || freq != 4 {
+		t.Fatalf("expected frequency 4 after 3 GETs, got %d", freq)
+	}
+}
+
+// LFU Test 3 — Lowest frequency is evicted
+func TestLFULowestFrequencyEvicted(t *testing.T) {
+	c := mustNewLFU(t, 4)
+
+	c.Set("W", "1") // freq 1
+	c.Set("X", "2") // freq 1 -> 2
+	c.Get("X")
+	c.Set("Y", "3") // freq 1 -> 3
+	c.Get("Y")
+	c.Get("Y")
+	c.Set("Z", "4") // freq 1 -> 4
+	c.Get("Z")
+	c.Get("Z")
+	c.Get("Z")
+
+	// Current frequencies: W: 1, X: 2, Y: 3, Z: 4.
+	// Insert new item: W (freq 1) must be evicted.
+	c.Set("NewKey", "5")
+
+	if _, ok := c.Get("W"); ok {
+		t.Fatalf("expected lowest frequency key 'W' to be evicted")
+	}
+
+	for _, key := range []string{"X", "Y", "Z", "NewKey"} {
+		if _, ok := c.Get(key); !ok {
+			t.Fatalf("expected key %q to remain in cache", key)
+		}
+	}
+}
+
+// LFU Test 4 — LFU tie breaking (LRU among equal frequencies)
+func TestLFUTieBreaking(t *testing.T) {
+	c := mustNewLFU(t, 3)
+
+	// Set A, B, C (all initially freq 1)
+	c.Set("A", "1")
+	c.Set("B", "2")
+	c.Set("C", "3")
+
+	// Increment A and B to freq 2
+	c.Get("A") // A freq = 2 (used earlier)
+	c.Get("B") // B freq = 2 (used more recently)
+	// C remains freq 1
+
+	// Insert D -> C has freq 1, so C is evicted without tie
+	c.Set("D", "4")
+	if _, ok := c.Get("C"); ok {
+		t.Fatalf("expected 'C' to be evicted as lowest frequency")
+	}
+
+	// Now D has freq 1. Increment D to freq 2.
+	c.Get("D") // D freq = 2
+
+	// Now all keys A, B, D have frequency 2!
+	// Recency order inside freq 2 bucket:
+	// A was accessed first, then B, then D.
+	// So A is the least recently used in freq 2!
+	// Inserting E (freq 1) must evict A via LRU tie-breaking!
+	c.Set("E", "5")
+
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected 'A' to be evicted as LRU among items with equal frequency 2")
+	}
+
+	for _, key := range []string{"B", "D", "E"} {
+		if _, ok := c.Get(key); !ok {
+			t.Fatalf("expected key %q to remain in cache", key)
+		}
+	}
+}
+
+// LFU Test 5 — Updating an existing key
+func TestLFUUpdateExistingKey(t *testing.T) {
+	c := mustNewLFU(t, 3)
+
+	c.Set("A", "100") // freq 1
+	c.Get("A")        // freq 2
+	c.Set("A", "200") // freq 3 (update treated as access)
+
+	val, ok := c.Get("A") // freq 4
+	if !ok || val != "200" {
+		t.Fatalf("expected value '200', got %q", val)
+	}
+
+	freq, ok := c.GetFrequency("A")
+	if !ok || freq != 4 {
+		t.Fatalf("expected frequency 4 after update and GET, got %d", freq)
+	}
+}
+
+// LFU Test 6 — Delete removes key and metadata
+func TestLFUDeleteRemovesMetadata(t *testing.T) {
+	c := mustNewLFU(t, 3)
+
+	c.Set("A", "1")
+	c.Set("B", "2")
+	c.Set("C", "3")
+
+	deleted := c.Delete("B")
+	if !deleted {
+		t.Fatalf("expected Delete('B') to return true")
+	}
+
+	if _, ok := c.Get("B"); ok {
+		t.Fatalf("expected 'B' to be deleted from cache")
+	}
+
+	if _, ok := c.GetFrequency("B"); ok {
+		t.Fatalf("expected 'B' frequency metadata to be deleted")
+	}
+
+	if c.Size() != 2 {
+		t.Fatalf("expected size 2 after deleting 'B', got %d", c.Size())
+	}
+
+	// Deleting a non-existent key returns false
+	if c.Delete("unknown") {
+		t.Fatalf("expected Delete('unknown') to return false")
+	}
+}
+
+// LFU Test 7 — Capacity
+func TestLFUCapacity(t *testing.T) {
+	capacity := 4
+	c := mustNewLFU(t, capacity)
+
+	for i := 0; i < 40; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		c.Set(key, fmt.Sprintf("val-%d", i))
+		if i%3 == 0 {
+			c.Get(key) // increase frequency of some keys
+		}
+		if c.Size() > capacity {
+			t.Fatalf("size %d exceeded capacity %d", c.Size(), capacity)
+		}
+	}
+
+	if c.Size() != capacity {
+		t.Fatalf("expected size to equal capacity %d, got %d", capacity, c.Size())
+	}
+}
+
+// LFU Test 8 — Capacity = 1
+func TestLFUCapacityOne(t *testing.T) {
+	c := mustNewLFU(t, 1)
+
+	c.Set("A", "1")
+	val, ok := c.Get("A")
+	if !ok || val != "1" {
+		t.Fatalf("expected Get('A') to return '1', true")
+	}
+
+	// A has freq 2 now. Set B: A should be evicted.
+	c.Set("B", "2")
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected 'A' to be evicted with capacity 1")
+	}
+
+	val, ok = c.Get("B")
+	if !ok || val != "2" {
+		t.Fatalf("expected Get('B') to return '2', true")
+	}
+
+	if c.Size() != 1 {
+		t.Fatalf("expected size 1, got %d", c.Size())
+	}
+
+	// Update existing key
+	c.Set("B", "20")
+	val, ok = c.Get("B")
+	if !ok || val != "20" {
+		t.Fatalf("expected Get('B') to return '20', true")
+	}
+
+	// Delete
+	if !c.Delete("B") {
+		t.Fatalf("expected Delete('B') to return true")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// LFU Test 9 — Concurrent access
+func TestLFUConcurrentAccess(t *testing.T) {
+	capacity := 20
+	c := mustNewLFU(t, capacity)
+	var wg sync.WaitGroup
+
+	numGoroutines := 50
+	operationsPerGoroutine := 200
+
+	// Spawn writers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%40)
+				val := fmt.Sprintf("val-%d-%d", workerID, j)
+				c.Set(key, val)
+			}
+		}(i)
+	}
+
+	// Spawn readers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%40)
+				_, _ = c.Get(key)
+			}
+		}()
+	}
+
+	// Spawn deleters
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%40)
+				_ = c.Delete(key)
+			}
+		}()
+	}
+
+	// Spawn size and frequency checkers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				s := c.Size()
+				if s > capacity {
+					t.Errorf("LFU size %d exceeded capacity %d during concurrency", s, capacity)
+				}
+				key := fmt.Sprintf("key-%d", j%40)
+				_, _ = c.GetFrequency(key)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if c.Size() > capacity {
+		t.Fatalf("final LFU size %d exceeded capacity %d", c.Size(), capacity)
 	}
 }
