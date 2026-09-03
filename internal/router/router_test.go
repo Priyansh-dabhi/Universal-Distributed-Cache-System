@@ -23,12 +23,14 @@ func TestDeterministicRouting(t *testing.T) {
 		{ID: "node-2", Address: "http://localhost:8002"},
 		{ID: "node-3", Address: "http://localhost:8003"},
 	}
-	reg, err := NewRegistry(nodes)
-	if err != nil {
-		t.Fatalf("failed to create registry: %v", err)
+	ring := NewHashRing(DefaultReplicas)
+	for _, n := range nodes {
+		if err := ring.AddNode(n); err != nil {
+			t.Fatalf("failed to add node: %v", err)
+		}
 	}
 
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	r := New(ring, DefaultConfig(9000))
 
 	keys := []string{"user:123", "session:abc", "product:999", "alpha", "beta"}
 
@@ -58,11 +60,14 @@ func TestDifferentKeys(t *testing.T) {
 		{ID: "node-2", Address: "http://localhost:8002"},
 		{ID: "node-3", Address: "http://localhost:8003"},
 	}
-	reg, _ := NewRegistry(nodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	for _, n := range nodes {
+		_ = ring.AddNode(n)
+	}
+	r := New(ring, DefaultConfig(9000))
 
 	seenNodes := make(map[string]bool)
-	keys := []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10"}
+	keys := []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12"}
 
 	for _, k := range keys {
 		n, err := r.Route(k)
@@ -80,11 +85,9 @@ func TestDifferentKeys(t *testing.T) {
 
 // Test 3 — Empty key
 func TestEmptyKey(t *testing.T) {
-	nodes := []Node{
-		{ID: "node-1", Address: "http://localhost:8001"},
-	}
-	reg, _ := NewRegistry(nodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: "http://localhost:8001"})
+	r := New(ring, DefaultConfig(9000))
 
 	_, err := r.Route("")
 	if err != ErrEmptyKey {
@@ -92,24 +95,22 @@ func TestEmptyKey(t *testing.T) {
 	}
 }
 
-// Test 4 — Node count
-func TestNodeCountModulo(t *testing.T) {
-	hasher := NewFNVHasher()
-
+// Test 4 — Node count routing across variable node counts
+func TestNodeCountRouting(t *testing.T) {
 	for nodeCount := 1; nodeCount <= 10; nodeCount++ {
+		ring := NewHashRing(DefaultReplicas)
 		nodes := make([]Node, nodeCount)
 		for i := 0; i < nodeCount; i++ {
 			nodes[i] = Node{
 				ID:      fmt.Sprintf("node-%d", i+1),
 				Address: fmt.Sprintf("http://localhost:%d", 8000+i),
 			}
-		}
-		reg, err := NewRegistry(nodes)
-		if err != nil {
-			t.Fatalf("failed to create registry with %d nodes: %v", nodeCount, err)
+			if err := ring.AddNode(nodes[i]); err != nil {
+				t.Fatalf("failed to add node to ring: %v", err)
+			}
 		}
 
-		r := New(reg, hasher, DefaultConfig(9000))
+		r := New(ring, DefaultConfig(9000))
 
 		for j := 0; j < 100; j++ {
 			key := fmt.Sprintf("key-%d-%d", nodeCount, j)
@@ -130,6 +131,23 @@ func TestNodeCountModulo(t *testing.T) {
 				t.Fatalf("routed node %s not in configured nodes for count %d", node.ID, nodeCount)
 			}
 		}
+	}
+}
+
+// TestNewWithRegistry verifies constructor compatibility with Registry
+func TestNewWithRegistry(t *testing.T) {
+	nodes := []Node{
+		{ID: "node-1", Address: "http://localhost:8001"},
+		{ID: "node-2", Address: "http://localhost:8002"},
+	}
+	reg, err := NewRegistry(nodes)
+	if err != nil {
+		t.Fatalf("unexpected registry error: %v", err)
+	}
+
+	r := NewWithRegistry(reg, NewFNVHasher(), DefaultConfig(9000))
+	if len(r.Nodes()) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(r.Nodes()))
 	}
 }
 
@@ -217,9 +235,9 @@ func TestParseNodeString(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestRouterHealth(t *testing.T) {
-	nodes := []Node{{ID: "node-1", Address: "http://localhost:8001"}}
-	reg, _ := NewRegistry(nodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: "http://localhost:8001"})
+	r := New(ring, DefaultConfig(9000))
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -239,12 +257,10 @@ func TestRouterHealth(t *testing.T) {
 }
 
 func TestRouterNodesEndpoint(t *testing.T) {
-	nodes := []Node{
-		{ID: "node-1", Address: "http://localhost:8001"},
-		{ID: "node-2", Address: "http://localhost:8002"},
-	}
-	reg, _ := NewRegistry(nodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: "http://localhost:8001"})
+	_ = ring.AddNode(Node{ID: "node-2", Address: "http://localhost:8002"})
+	r := New(ring, DefaultConfig(9000))
 
 	req := httptest.NewRequest(http.MethodGet, "/nodes", nil)
 	w := httptest.NewRecorder()
@@ -255,19 +271,23 @@ func TestRouterNodesEndpoint(t *testing.T) {
 	}
 
 	var res struct {
-		Nodes []Node `json:"nodes"`
+		Nodes    []Node `json:"nodes"`
+		Replicas int    `json:"replicas"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &res)
 	if len(res.Nodes) != 2 || res.Nodes[0].ID != "node-1" || res.Nodes[1].ID != "node-2" {
 		t.Fatalf("nodes mismatch: %+v", res.Nodes)
 	}
+	if res.Replicas != DefaultReplicas {
+		t.Fatalf("expected replicas %d, got %d", DefaultReplicas, res.Replicas)
+	}
 }
 
 func TestRouterNodeUnavailable(t *testing.T) {
 	// Point to an address where no server is listening
-	nodes := []Node{{ID: "dead-node", Address: "http://127.0.0.1:59999"}}
-	reg, _ := NewRegistry(nodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "dead-node", Address: "http://127.0.0.1:59999"})
+	r := New(ring, DefaultConfig(9000))
 
 	req := httptest.NewRequest(http.MethodGet, "/cache/test-key", nil)
 	w := httptest.NewRecorder()
@@ -288,9 +308,9 @@ func TestRouterNodeUnavailable(t *testing.T) {
 }
 
 func TestRouterUnsupportedMethod(t *testing.T) {
-	nodes := []Node{{ID: "node-1", Address: "http://localhost:8001"}}
-	reg, _ := NewRegistry(nodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: "http://localhost:8001"})
+	r := New(ring, DefaultConfig(9000))
 
 	req := httptest.NewRequest(http.MethodPost, "/cache/key", nil)
 	w := httptest.NewRecorder()
@@ -327,12 +347,14 @@ func TestCriticalThreeNodeRouting(t *testing.T) {
 		{ID: "node-3", Address: s3.URL},
 	}
 
-	reg, err := NewRegistry(backendNodes)
-	if err != nil {
-		t.Fatalf("failed to create registry: %v", err)
+	ring := NewHashRing(DefaultReplicas)
+	for _, bn := range backendNodes {
+		if err := ring.AddNode(bn); err != nil {
+			t.Fatalf("failed to add node to ring: %v", err)
+		}
 	}
 
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	r := New(ring, DefaultConfig(9000))
 	routerServer := httptest.NewServer(r.Handler())
 	defer routerServer.Close()
 
@@ -422,7 +444,7 @@ func TestCriticalThreeNodeRouting(t *testing.T) {
 	}
 }
 
-// TestMultipleKeysIntegration tests keys A through H across nodes.
+// TestMultipleKeysIntegration tests keys A through H across nodes with consistent hashing.
 func TestMultipleKeysIntegration(t *testing.T) {
 	n1, _ := node.New(node.Config{ID: "node-1", Host: "127.0.0.1", Port: 18001, Capacity: 20, Policy: "lru"})
 	n2, _ := node.New(node.Config{ID: "node-2", Host: "127.0.0.1", Port: 18002, Capacity: 20, Policy: "lru"})
@@ -441,8 +463,12 @@ func TestMultipleKeysIntegration(t *testing.T) {
 		{ID: "node-3", Address: s3.URL},
 	}
 
-	reg, _ := NewRegistry(backendNodes)
-	r := New(reg, NewFNVHasher(), DefaultConfig(9000))
+	ring := NewHashRing(DefaultReplicas)
+	for _, bn := range backendNodes {
+		_ = ring.AddNode(bn)
+	}
+
+	r := New(ring, DefaultConfig(9000))
 	routerServer := httptest.NewServer(r.Handler())
 	defer routerServer.Close()
 
