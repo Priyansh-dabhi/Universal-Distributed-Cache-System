@@ -24,4 +24,15 @@ Client → Router → Cache Nodes
 
 ## Status
 
-🚧 Initial project setup
+🚧 In active development — Phase 1 complete
+
+## Phase 1 — Basic In-Memory Cache
+
+Implemented:
+
+- SET
+- GET
+- DELETE
+- Size tracking
+- Concurrent access protection
+- Unit tests
