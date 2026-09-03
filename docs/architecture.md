@@ -1,75 +1,141 @@
 # Architecture
 
-## Current Architecture (Phase 9 — Consistent Hashing)
+## Current Architecture (Phase 10 — Concurrency, Metrics & Observability)
 
-The system implements a distributed cache cluster where client requests are routed through a central HTTP reverse proxy router backed by a **Consistent Hash Ring** with virtual nodes:
+The system implements a distributed cache cluster where client requests are routed through a central HTTP reverse proxy router backed by a **Consistent Hash Ring** with virtual nodes, hardened for high concurrent throughput, and instrumented with lock-free atomic telemetry:
 
 ```text
-                 Client
-                    │
-                    ▼
-                 Router (:9000)
-                    │
-                    ▼
-           ┌────────────────┐
-           │   Hash Ring    │
-           │ (Virtual Nodes)│
-           └────────────────┘
-                    │
-                    ▼
-              selected Node
-                    │
-       ┌────────────┼────────────┐
-       ↓            ↓            ↓
-  ┌─────────┐  ┌─────────┐  ┌─────────┐
-  │ Node 1  │  │ Node 2  │  │ Node 3  │
-  │ :8001   │  │ :8002   │  │ :8003   │
-  └────┬────┘  └────┬────┘  └────┬────┘
-       ↓            ↓            ↓
-    Cache 1      Cache 2      Cache 3
-       │            │            │
-  (LRU/LFU/2Q) (LRU/LFU/2Q) (LRU/LFU/2Q)
-     + TTL        + TTL        + TTL
+                    Client
+                       │
+                       ▼
+                 ┌───────────┐
+                 │  Router   │
+                 │  (:9000)  │
+                 └─────┬─────┘
+                       │
+                Consistent Hash
+                     Ring
+                       │
+              ┌────────┼────────┐
+              │        │        │
+              ▼        ▼        ▼
+            Node 1   Node 2   Node 3
+            :8001    :8002    :8003
+              │        │        │
+              ▼        ▼        ▼
+            Cache    Cache    Cache
+            Engine   Engine   Engine
+              │        │        │
+              └────────┼────────┘
+                       │
+                   Telemetry
+                   (Metrics)
 ```
 
 ---
 
-## 1. Why Modulo Hashing Was Used in Phase 8
+## 1. Concurrency & Locking Strategy
 
-In Phase 8, the router used simple modulo hashing:
-$$\text{index} = \text{hash}(\text{key}) \pmod N$$
-where $N$ is the number of active cache nodes.
+### Cache Engine Locking
+- **Exclusive Locking on `Get`**: A `Get` in this cache system is **not** a read-only operation:
+  - In **LRU**: `Get` moves the entry to the MRU position.
+  - In **LFU**: `Get` increments the entry's access frequency and promotes it to a higher bucket.
+  - In **2Q**: `Get` can promote an entry from queue A1 to queue Am.
+  - In **TTL**: `Get` detects expired items and lazily purges them.
+  Therefore, `Cache.Get` acquires an exclusive lock (`c.mu.Lock()`).
+- **Shared Locking on Introspection**: Read-only queries such as `Size()`, `Capacity()`, `Policy()`, and queue inspector helpers acquire a shared read lock (`c.mu.RLock()`).
+- **Minimal Lock Scopes**: Lock scopes are restricted strictly to in-memory pointer manipulation and map lookups. Locks are released immediately before any subsequent processing.
 
-Modulo hashing was chosen in Phase 8 as a baseline because it is straightforward to implement, fast ($O(1)$ arithmetic), and produces a deterministic mapping when the cluster topology ($N$) never changes.
-
----
-
-## 2. The Problem With Modulo Hashing When Node Count Changes
-
-While simple, modulo hashing suffers from extreme cache disruption when nodes are added or removed ($N \to N \pm 1$). Because the divisor changes:
-$$\text{hash}(\text{key}) \pmod 3 \neq \text{hash}(\text{key}) \pmod 4$$
-
-When moving from 3 nodes to 4 nodes, mathematically **75% of all keys change owners**.
-In general, when moving from $N$ to $N+1$ nodes under modulo hashing, the fraction of keys that must be remapped is:
-$$1 - \frac{1}{N+1} = \frac{N}{N+1}$$
-
-For large clusters, adding a single node remaps almost 100% of all keys, causing massive cache misses, stampedes on backend databases, and catastrophic performance degradation. Furthermore, modulo hashing is strictly order-dependent: changing the order of nodes in the configuration remaps almost all keys.
-
----
-
-## 3. What Consistent Hashing Is
-
-Consistent hashing is a distributed hashing technique where both keys and nodes are mapped onto a circular numerical space (the **hash ring**).
-
-When the node set changes (nodes added or removed), consistent hashing ensures that only:
-$$\approx \frac{K}{N}$$
-keys need to be remapped on average (where $K$ is the total number of keys and $N$ is the number of nodes), rather than all keys.
+### Router & Network I/O Locking
+- **Locking Completely Decoupled from Network I/O**: The router **never** holds a lock during outbound network communication:
+  1. `Route(key)` queries `HashRing.GetNode(key)` under a brief read lock (`r.ring.mu.RLock()`) to find the target node.
+  2. The read lock is released immediately.
+  3. Outbound proxy HTTP requests (`r.client.Do(req)`) run completely outside of any lock.
+- **Context Propagation**: The router forwards the incoming request context (`req.Context()`) to the backend request (`http.NewRequestWithContext(req.Context(), ...)`). If a client disconnects or aborts, the backend request is automatically canceled.
+- **Connection Reuse**: The router uses a shared, long-lived `http.Client` with connection pooling and configurable request timeouts (`DefaultConfig.ClientTimeout = 5s`).
 
 ---
 
-## 4. What a Hash Ring Is
+## 2. Metrics & Observability
 
-The 32-bit hash space ($[0, 2^{32}-1]$) is treated as a continuous circular ring:
+### Why Metrics Exist
+> **Correctness** tells us whether the cache works.  
+> **Metrics** tell us how the cache behaves.
+
+Metrics allow operators to monitor hit ratios, capacity pressure, latency trends, and node health without changing cache semantics or adding runtime performance penalties.
+
+### Lock-Free Atomic Metrics
+Metrics are implemented in `internal/metrics` using `sync/atomic` 64-bit unsigned integer counters (`atomic.Uint64`). Operations use fast hardware atomic instructions (`Add(1)`, `Load()`), avoiding mutex contention even under high concurrent loads.
+
+### Metric Ownership Separation
+
+```text
+Router metrics ≠ Node metrics ≠ Cache engine metrics
+```
+
+Because requests pass through multiple layers, metric ownership is strictly delineated:
+
+| Metric | Measured At | Layer | Description |
+| :--- | :---: | :---: | :--- |
+| **`hits`** | Cache Engine | Cache | Key found and valid (not expired) |
+| **`misses`** | Cache Engine | Cache | Key not found OR found but expired |
+| **`hit_rate`** | Cache Engine | Cache | Calculated: $\frac{\text{hits}}{\text{hits} + \text{misses}}$ (0.0 if total is 0) |
+| **`sets`** | Cache Engine | Cache | Number of `Set` and `SetWithTTL` operations |
+| **`deletes`** | Cache Engine | Cache | Number of entries removed via `Delete` |
+| **`evictions`** | Cache Engine | Cache | Number of valid entries evicted due to capacity limits |
+| **`expired`** | Cache Engine | Cache | Number of expired entries purged upon access |
+| **`requests`** | Node & Router | HTTP | Total HTTP requests handled at that specific layer |
+| **`errors_4xx`** | Node & Router | HTTP | Total client-side errors (400 Bad Request, 404 Not Found, 405 Method Not Allowed) |
+| **`errors_5xx`** | Node & Router | HTTP | Total server-side errors (500 Internal Error, 502 Bad Gateway) |
+| **`avg_latency_ms`** | Node & Router | HTTP | Average request duration: $\frac{\text{totalLatencyNs}}{\text{requests} \times 10^6}$ |
+
+---
+
+## 3. Observability Endpoints
+
+### Cache Server Node (`GET /metrics`)
+Returns JSON containing both node-level HTTP metrics and underlying cache engine statistics:
+
+```json
+{
+  "hits": 1200,
+  "misses": 300,
+  "hit_rate": 0.8,
+  "sets": 1500,
+  "deletes": 100,
+  "evictions": 50,
+  "expired": 25,
+  "requests": 1600,
+  "errors_4xx": 10,
+  "errors_5xx": 2,
+  "avg_latency_ms": 1.42,
+  "policy": "lru",
+  "capacity": 1000,
+  "size": 742
+}
+```
+
+*(Note: Cache servers also preserve `GET /cache` for simple status: `{"size": 742, "capacity": 1000, "policy": "lru"}`).*
+
+### Router (`GET /metrics`)
+Returns JSON containing router-specific reverse proxy metrics:
+
+```json
+{
+  "requests": 5000,
+  "successes": 4965,
+  "errors_4xx": 20,
+  "errors_5xx": 15,
+  "avg_latency_ms": 2.1
+}
+```
+
+---
+
+## 4. Consistent Hashing & Ring Mechanics
+
+### Hash Ring Structure
+The 32-bit FNV-1a hash space ($[0, 2^{32}-1]$) forms a continuous circular ring:
 
 ```text
                  Node A
@@ -83,127 +149,24 @@ The 32-bit hash space ($[0, 2^{32}-1]$) is treated as a continuous circular ring
                 hash ring
 ```
 
-- Position `0` connects seamlessly to position `2^32 - 1`.
-- Physical nodes and their virtual replicas are assigned fixed positions along the perimeter of this ring based on the hash of their virtual node tokens.
-
----
-
-## 5. How Virtual Nodes Work
-
-If only physical nodes were placed on the ring (e.g. 3 points), large gaps could form between nodes, leading to severe load imbalance (hot spots).
-
-To solve this, each physical node is assigned multiple **virtual nodes** (replicas) across the ring:
-
 ```text
-node-1#0  --> hash("node-1#0")  --> position 124,912
-node-1#1  --> hash("node-1#1")  --> position 892,104,112
-...
-node-1#99 --> hash("node-1#99") --> position 3,991,421,009
-
-node-2#0  --> hash("node-2#0")  --> position 512,881
-node-2#1  --> hash("node-2#1")  --> position 1,120,491,220
-...
-node-2#99 --> hash("node-2#99") --> position 4,102,881,993
+key ──► hash(key) ──► ring position ──► clockwise binary search ──► selected physical node
 ```
 
-By default, the system assigns **100 virtual nodes (replicas)** per physical node (configurable via `--replicas` CLI flag or `NewHashRing(replicas)`). This intersperses positions evenly across the ring, guaranteeing uniform load distribution.
-
-### Collision Resolution Strategy
-In the rare event that two virtual node tokens produce the exact same 32-bit hash value, **linear probing** (`pos++`) is employed. In addition, physical node IDs are sorted alphabetically before generating virtual node tokens, guaranteeing that ring construction and virtual node placement are 100% deterministic and independent of node input order.
-
----
-
-## 6. How Key Routing Works
-
-To route a key:
-
-```text
-key
- ↓
-hash(key)
- ↓
-ring position
- ↓
-clockwise search
- ↓
-physical node
-```
-
-1. Compute the 32-bit FNV-1a checksum: `hashVal = hash(key)`.
-2. Locate the first virtual node position on the ring that is greater than or equal to `hashVal` (moving clockwise).
-3. If `hashVal` is greater than the highest position on the ring, wrap around clockwise to the ring's first position (`ringPositions[0]`).
-4. Look up the physical node associated with that virtual node position in `ringMap`.
-5. Forward the request to that selected physical node.
+- **Virtual Nodes**: Each physical node registers 100 virtual positions (configurable via `--replicas`) distributed evenly along the ring to eliminate hot spots.
+- **Clockwise Binary Search**: Key lookup takes $O(\log R)$ time via `sort.Search` (~121 ns per lookup in benchmarks).
+- **Minimal Key Redistribution**: Expanding from 3 to 4 nodes moves only ~15–25% of keys, compared to ~75% under modulo hashing.
+- **Order-Independent**: Node IDs are sorted alphabetically and deterministic linear probing resolves collisions, guaranteeing identical routing regardless of the node configuration order.
 
 ---
 
-## 7. What Happens When a Node Is Added
-
-When a new node (e.g., Node D) is added:
-1. Node D's virtual positions (`node-D#0` ... `node-D#99`) are inserted into the ring.
-2. Only the keys whose hash values fall immediately before Node D's new virtual positions will be captured by Node D.
-3. All other keys continue to map to their existing nodes without disruption.
-4. When moving from 3 to 4 nodes, only **~15–25% of keys move** (compared to ~75% in modulo hashing).
-
----
-
-## 8. What Happens When a Node Is Removed
-
-When a node (e.g., Node B) is removed:
-1. All virtual positions belonging to Node B are removed from the ring.
-2. Keys previously owned by Node B fall through to the next available virtual node positions clockwise on the ring.
-3. Keys belonging to remaining nodes (Node A, Node C) remain undisturbed on their respective nodes.
-4. No data migration is performed; future requests automatically resolve to the new clockwise owners.
-
----
-
-## 9. Why Binary Search Is Used
-
-Scanning an unsorted array of virtual node positions sequentially requires $O(R)$ time, where $R$ is the total number of virtual nodes (e.g., $10 \text{ nodes} \times 100 = 1,000 \text{ positions}$). Doing this on every cache request adds unnecessary latency.
-
-Instead, all virtual node hash positions are maintained in a sorted slice (`[]uint32`). When routing a key, the router uses standard library binary search:
-```go
-idx := sort.Search(len(ringPositions), func(i int) bool {
-    return ringPositions[i] >= hashVal
-})
-```
-This reduces lookup time to **$O(\log R)$**. In benchmarks, this executes in **~121 nanoseconds** per lookup (> 8.2 million lookups/second).
-
----
-
-## 10. Complexity Analysis
-
-| Operation | Complexity | Description |
-| :--- | :---: | :--- |
-| **`GetNode(key)`** | $O(\log R)$ | 32-bit FNV-1a hash calculation + binary search over $R$ virtual node positions |
-| **`AddNode(node)`** | $O(R \log R)$ | Generate $R_{\text{node}}$ virtual tokens, resolve collisions, sort ring positions |
-| **`RemoveNode(nodeID)`**| $O(R \log R)$ | Rebuild/filter remaining virtual positions and sort |
-| **`Nodes()`** | $O(N \log N)$ | Sort $N$ physical nodes by ID for deterministic ordering |
-
-*(where $N$ is the number of physical nodes, and $R = N \times \text{replicas}$ is the total number of virtual nodes on the ring).*
-
----
-
-## 11. Difference Between Phase 8 and Phase 9
-
-| Property | Phase 8 (Modulo Hashing) | Phase 9 (Consistent Hashing) |
-| :--- | :--- | :--- |
-| **Algorithm** | `hash(key) % N` | Hash Ring + Clockwise Binary Search |
-| **Node Addition Churn** | $\approx 75\%$ of keys remapped (3 $\to$ 4 nodes) | $\approx 15–25\%$ of keys remapped (3 $\to$ 4 nodes) |
-| **Node Ordering** | Order-sensitive; permuting nodes alters mappings | Order-independent; nodes normalized by ID |
-| **Hotspot Mitigation** | Relies solely on uniform hash distribution | Replicas/Virtual nodes smooth out variance across ring |
-| **Routing Complexity** | $O(1)$ arithmetic | $O(\log R)$ binary search (~121 ns) |
-| **Component Architecture**| Hashing coupled within router route logic | Reusable, independently testable `HashRing` component |
-
----
-
-## Clean Separation of Responsibilities
+## 5. Clean Layer Separation
 
 ```text
                 Client
                    │
                    ▼
-                Router
+                 Router
                    │
                    ▼
           ┌────────────────┐
@@ -223,7 +186,7 @@ This reduces lookup time to **$O(\log R)$**. In benchmarks, this executes in **~
                   TTL
 ```
 
-- **Router**: HTTP proxying, connection pooling, client timeouts, routing delegation.
+- **Router**: HTTP proxying, connection pooling, context propagation, client timeouts, routing delegation.
 - **HashRing**: Hash calculation, virtual node replica management, collision resolution, key-to-node clockwise mapping, thread safety.
-- **Cache Server**: Local HTTP API handlers (`PUT`, `GET`, `DELETE`, `/health`, `/node`), JSON validation, status codes.
-- **Cache Engine**: Eviction policies (LRU, LFU, 2Q), lazy TTL expiration, concurrency safety.
+- **Cache Server**: Local HTTP API handlers (`PUT`, `GET`, `DELETE`, `/health`, `/node`, `/cache`, `/metrics`), status recording.
+- **Cache Engine**: Eviction policies (LRU, LFU, 2Q), lazy TTL expiration, exclusive concurrency safety, cache telemetry.
