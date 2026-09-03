@@ -21,15 +21,17 @@ A lightweight distributed in-memory caching system built in Go.
 ## Status
 
 ```text
-Phase 1 — Basic In-Memory Cache    ✓
-Phase 2 — LRU                     ✓
-Phase 3 — LFU                     ✓
-Phase 4 — 2Q                      ✓
-Phase 5 — TTL                     ✓
-Phase 6 — HTTP API                ✓
-Phase 7 — Multiple Cache Nodes    ✓
-Phase 8 — Router                  ✓
-Phase 9 — Consistent Hashing      ✓
+Phase 1 — Basic In-Memory Cache            ✓
+Phase 2 — LRU                             ✓
+Phase 3 — LFU                             ✓
+Phase 4 — 2Q                              ✓
+Phase 5 — TTL                             ✓
+Phase 6 — HTTP API                        ✓
+Phase 7 — Multiple Cache Nodes            ✓
+Phase 8 — Router                          ✓
+Phase 9 — Consistent Hashing              ✓
+Phase 10 — Concurrency & Metrics          ✓
+Phase 11 — Benchmarking & Performance     Planned
 ```
 
 ---
@@ -71,6 +73,9 @@ Selected Cache Node (:8001, :8002, or :8003)
   │
   ▼
 Cache Engine (LRU / LFU / 2Q + TTL)
+  │
+  ▼
+Atomic Metrics & Telemetry
 ```
 
 ### Consistent Hashing Ring Mechanism
@@ -88,15 +93,7 @@ Cache Engine (LRU / LFU / 2Q + TTL)
 ```
 
 ```text
-key
- ↓
-hash(key)
- ↓
-ring position
- ↓
-clockwise binary search
- ↓
-physical node
+key ──► hash(key) ──► ring position ──► clockwise binary search ──► selected physical node
 ```
 
 - **Virtual Nodes**: Each physical node registers 100 virtual positions (configurable via `--replicas`) distributed evenly along the ring to eliminate load skew.
@@ -108,7 +105,7 @@ physical node
 
 ## Router HTTP REST API
 
-The router exposes a unified REST interface identical to individual cache nodes, plus node inspection endpoints:
+The router exposes a unified REST interface identical to individual cache nodes, plus node inspection and router telemetry endpoints:
 
 ### Endpoints
 
@@ -116,6 +113,7 @@ The router exposes a unified REST interface identical to individual cache nodes,
 | :--- | :--- | :--- |
 | **`GET`** | `/health` | Router health check returning `{"status": "ok"}` |
 | **`GET`** | `/nodes` | List of all registered backend cache nodes and replica count |
+| **`GET`** | `/metrics` | Router-level HTTP metrics (requests, 4xx/5xx errors, latency) |
 | **`PUT`** | `/cache/{key}` | Deterministically route and store entry on owning cache node |
 | **`GET`** | `/cache/{key}` | Deterministically route and retrieve entry from owning cache node |
 | **`DELETE`** | `/cache/{key}` | Deterministically route and remove entry from owning cache node |
@@ -134,7 +132,13 @@ curl http://localhost:9000/nodes
 # Response: {"nodes":[{"id":"node-1","address":"http://localhost:8001"},{"id":"node-2","address":"http://localhost:8002"},{"id":"node-3","address":"http://localhost:8003"}],"replicas":100}
 ```
 
-#### 3. Store Key via Router
+#### 3. Router Telemetry
+```bash
+curl http://localhost:9000/metrics
+# Response: {"requests":5000,"successes":4965,"errors_4xx":20,"errors_5xx":15,"avg_latency_ms":0.42}
+```
+
+#### 4. Store Key via Router
 ```bash
 curl -X PUT http://localhost:9000/cache/user:123 \
   -H "Content-Type: application/json" \
@@ -142,17 +146,51 @@ curl -X PUT http://localhost:9000/cache/user:123 \
 # Response: {"message":"cache entry stored"}
 ```
 
-#### 4. Retrieve Key via Router
+#### 5. Retrieve Key via Router
 ```bash
 curl http://localhost:9000/cache/user:123
 # Response: {"key":"user:123","value":"Priyansh"}
 ```
 
-#### 5. Delete Key via Router
+#### 6. Delete Key via Router
 ```bash
 curl -X DELETE http://localhost:9000/cache/user:123
 # Response: {"message":"cache entry deleted"}
 ```
+
+---
+
+## Node-Level Observability (`GET /metrics`)
+
+Each individual cache node exposes its own independent telemetry:
+
+```bash
+curl http://localhost:8001/metrics
+```
+
+Example JSON Response:
+```json
+{
+  "hits": 1200,
+  "misses": 300,
+  "hit_rate": 0.8,
+  "sets": 1500,
+  "deletes": 100,
+  "evictions": 50,
+  "expired": 25,
+  "requests": 1600,
+  "errors_4xx": 10,
+  "errors_5xx": 2,
+  "avg_latency_ms": 1.42,
+  "policy": "lru",
+  "capacity": 1000,
+  "size": 742
+}
+```
+
+### Hit Rate Calculation
+$$\text{Hit Rate} = \frac{\text{hits}}{\text{hits} + \text{misses}}$$
+*(Safely returns `0.0` if total queries are 0).*
 
 ---
 
@@ -174,7 +212,7 @@ These are independent mechanisms.
 * **`Set(key, value)`**: Stores a key with no expiration (`expiresAt` is zero). If the key previously had a TTL, the expiration is removed, converting it into a persistent cache entry.
 * **`SetWithTTL(key, value, ttl)`**: Stores a key with an absolute expiration calculated as `time.Now().Add(ttl)`.
 * **Updating TTL**: Calling `SetWithTTL` on an existing key updates its value and resets its expiration to `now + new_ttl`.
-* **Lazy Expiration**: Expired entries are detected and cleaned up lazily when an operation encounters them (`GET`, `DELETE`). This avoids background cleanup goroutines and extra concurrency overhead while guaranteeing expired entries are never returned.
+* **Lazy Expiration**: Expired entries are detected and cleaned up lazily when an operation encounters them (`GET`, `DELETE`). Expired reads are counted as misses and increment the `expired` metric counter.
 * **Edge-case Semantics (`TTL <= 0`)**:
   - `TTL = 0` or negative `TTL < 0`: Treated as immediately expired. Any existing entry with that key is removed immediately, and no entry is stored in cache.
 
@@ -204,25 +242,12 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 
 ## Major Data Structures
 
-### Cache Coordinator & TTL
-- **`expiresAt time.Time`**: Attached to each cache node across all eviction policies.
-- **Lazy Eviction on Access**: During `Get`, if `!expiresAt.IsZero() && now >= expiresAt`, the entry is unlinked and deleted in $O(1)$ time.
+### Cache Coordinator & Locking
+- **Locking Strategy**: `Get` operations acquire an exclusive write lock (`Lock()`) because `Get` mutates LRU recency, LFU frequency, 2Q queue promotions, or performs lazy TTL purges.
+- **Lock Scopes**: In-memory pointer/map operations only. No locks held across network boundaries.
 
-### LRU Architecture
-- **HashMap (`map[string]*lruNode`)**: $O(1)$ key lookup.
-- **Doubly Linked List**: Maintains recency order between sentinel `head` (MRU) and `tail` (LRU).
-
-### LFU Architecture
-- **HashMap (`map[string]*lfuNode`)**: $O(1)$ key-to-node lookup.
-- **Frequency Buckets (`map[int]*lfuList`)**: Maps each access frequency to an ordered doubly linked list of items.
-  - New/updated items are prepended at the head (MRU within that frequency).
-  - The tail (`tail.prev`) holds the least recently accessed item with that frequency (enabling $O(1)$ LRU tie-breaking).
-- **`minFreq` Counter**: Tracks the minimum non-empty frequency bucket for $O(1)$ eviction candidate selection without scanning.
-
-### 2Q Architecture
-- **HashMap (`map[string]*twoQNode`)**: $O(1)$ key-to-node index mapping.
-- **Queue A1 (`twoQList`)**: Doubly linked list managed as a FIFO queue for recent admissions.
-- **Queue Am (`twoQList`)**: Doubly linked list managed as an LRU queue for promoted entries.
+### Lock-Free Atomic Metrics
+- **Atomic Counters (`internal/metrics`)**: Implemented with `sync/atomic` 64-bit unsigned integers (`atomic.Uint64`), eliminating mutex contention across concurrent requests.
 
 ### Consistent Hash Ring Architecture
 - **Sorted Positions (`[]uint32`)**: $O(\log R)$ binary search (`sort.Search`) for clockwise key lookup.
@@ -232,22 +257,17 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 
 ---
 
-## Time Complexity
+## Time Complexity & Performance
 
-| Operation | Expected Complexity | Description |
-| :--- | :---: | :--- |
-| **GET** | $O(1)$ average | Map lookup + $O(1)$ expiration check + recency/frequency/promotion update |
-| **SET** | $O(1)$ average | Map lookup/insert + node insertion + optional eviction |
-| **SET with TTL** | $O(1)$ average | Same as SET with timestamp calculation |
-| **DELETE** | $O(1)$ average | Map removal + unlinking from linked list / frequency bucket / 2Q queue |
-| **Expiration Check** | $O(1)$ | Timestamp comparison (`now >= expiresAt`) |
-| **Promotion A1 → Am** | $O(1)$ | Unlink from A1 and prepend to Am head |
-| **A1 eviction** | $O(1)$ | Unlink tail of A1 FIFO queue |
-| **Am eviction** | $O(1)$ | Unlink tail of Am LRU queue |
-| **Size** | $O(1)$ | Querying map length (expired entries cleaned up on access) |
-| **Key Routing** | $O(\log R)$ | FNV-1a hash calculation + binary search clockwise on $R$ virtual node positions (~121 ns) |
-| **Node Addition** | $O(R \log R)$ | Registering virtual nodes, resolving collisions, and sorting ring |
-| **Node Removal** | $O(R \log R)$ | Removing virtual nodes and updating ring |
+| Operation | Expected Complexity | Benchmarked Latency | Description |
+| :--- | :---: | :---: | :--- |
+| **LRU GET** | $O(1)$ average | **~95 ns/op** | Map lookup + recency promotion + lock-free atomic metric increment |
+| **LFU GET** | $O(1)$ average | **~105 ns/op** | Map lookup + bucket frequency promotion |
+| **2Q GET** | $O(1)$ average | **~86 ns/op** | Map lookup + A1 $\to$ Am queue promotion |
+| **LRU SET** | $O(1)$ average | **~184 ns/op** | Map insert + LRU node push |
+| **LFU SET** | $O(1)$ average | **~198 ns/op** | Map insert + bucket 1 push |
+| **2Q SET** | $O(1)$ average | **~173 ns/op** | Map insert + A1 FIFO push |
+| **Key Routing** | $O(\log R)$ | **~123 ns/op** | FNV-1a hash calculation + binary search clockwise on $R$ virtual node positions |
 
 ---
 
@@ -305,3 +325,12 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - Minimal key churn upon topology changes: only ~15–25% of keys remapped on node addition vs ~75% in modulo hashing
 - Deterministic virtual node naming with linear probing collision resolution ensuring input-order independence
 - Router HTTP handlers decoupled from hashing implementation details
+
+### Phase 10 — Concurrency, Metrics & Observability
+- Concurrency hardening across all cache engines with exclusive locking on state-mutating `Get` operations
+- Lock-free atomic metrics package (`internal/metrics`) tracking hits, misses, hit rate, sets, deletes, evictions, expired entries
+- Clean separation of metric ownership between Router, Node, and Cache Engine
+- HTTP request telemetry tracking total requests, 2xx/4xx/5xx status codes, and average latency
+- New `/metrics` JSON endpoints for both cache server nodes and the distributed router
+- Context propagation (`http.NewRequestWithContext`) canceling outbound requests upon client disconnect
+- Multi-worker concurrent stress tests and Go benchmark suite in preparation for Phase 11
