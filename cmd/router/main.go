@@ -18,6 +18,7 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "Router host or bind address (default 127.0.0.1)")
 	port := flag.Int("port", 9000, "Router HTTP server port (default 9000)")
 	nodesStr := flag.String("nodes", "", "Comma-separated cache nodes (e.g. node-1=http://localhost:8001,node-2=http://localhost:8002)")
+	replicas := flag.Int("replicas", router.DefaultReplicas, "Number of virtual node replicas per physical node (default 100)")
 	flag.Parse()
 
 	if *nodesStr == "" {
@@ -29,16 +30,17 @@ func main() {
 		log.Fatalf("invalid node configuration: %v", err)
 	}
 
-	registry, err := router.NewRegistry(nodes)
-	if err != nil {
-		log.Fatalf("failed to initialize node registry: %v", err)
+	ring := router.NewHashRing(*replicas)
+	for _, n := range nodes {
+		if err := ring.AddNode(n); err != nil {
+			log.Fatalf("failed to add node %s to hash ring: %v", n.ID, err)
+		}
 	}
 
-	hasher := router.NewFNVHasher()
 	cfg := router.DefaultConfig(*port)
 	cfg.Host = *host
 
-	r := router.New(registry, hasher, cfg)
+	r := router.New(ring, cfg)
 
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
