@@ -30,8 +30,82 @@ Phase 2 — LRU                     ✓
 Phase 3 — LFU                     ✓
 Phase 4 — 2Q                      ✓
 Phase 5 — TTL                     ✓
-Phase 6 — HTTP API                Planned
+Phase 6 — HTTP API                ✓
+Phase 7 — Multiple Cache Nodes    Planned
 ```
+
+---
+
+## HTTP REST API
+
+The cache server exposes a REST API powered by Go's standard library `net/http`.
+
+### Endpoints
+
+| Method | Path | Description |
+| :--- | :--- | :--- |
+| **`GET`** | `/health` | Health check endpoint returning `{"status": "ok"}` |
+| **`GET`** | `/cache` | Information about cache size, capacity, and eviction policy |
+| **`PUT`** | `/cache/{key}` | Store a key-value entry (supports optional `ttl` duration) |
+| **`GET`** | `/cache/{key}` | Retrieve an entry by key (returns 404 on miss or expiration) |
+| **`DELETE`** | `/cache/{key}` | Remove an entry by key (returns 404 if missing or expired) |
+
+### cURL Examples
+
+#### 1. Health Check
+```bash
+curl http://localhost:8080/health
+# Response: {"status":"ok"}
+```
+
+#### 2. Set Entry (without TTL)
+```bash
+curl -X PUT http://localhost:8080/cache/user:123 \
+  -H "Content-Type: application/json" \
+  -d '{"value":"Priyansh"}'
+# Response: {"message":"cache entry stored"}
+```
+
+#### 3. Set Entry with TTL
+```bash
+curl -X PUT http://localhost:8080/cache/session:abc \
+  -H "Content-Type: application/json" \
+  -d '{"value":"active","ttl":"60s"}'
+# Response: {"message":"cache entry stored"}
+```
+
+#### 4. Get Entry
+```bash
+curl http://localhost:8080/cache/user:123
+# Response: {"key":"user:123","value":"Priyansh"}
+```
+
+#### 5. Cache Information
+```bash
+curl http://localhost:8080/cache
+# Response: {"size":2,"capacity":100,"policy":"lru"}
+```
+
+#### 6. Delete Entry
+```bash
+curl -X DELETE http://localhost:8080/cache/user:123
+# Response: {"message":"cache entry deleted"}
+```
+
+---
+
+## Running the Server
+
+Start the single-node cache server with configurable port, capacity, and eviction policy:
+
+```bash
+go run ./cmd/cache-server --port 8080 --capacity 100 --policy lru
+```
+
+Supported eviction policies for `--policy`:
+* `lru` (Least Recently Used)
+* `lfu` (Least Frequently Used)
+* `2q` (Two-Queue)
 
 ---
 
@@ -149,3 +223,9 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - Reversion to persistent entries on normal `Set`
 - Lazy expiration upon access preventing background cleanup goroutine overhead
 - Seamless compatibility with LRU, LFU, and 2Q eviction mechanics
+
+### Phase 6 — HTTP API
+- RESTful HTTP transport layer using Go standard library `net/http`
+- Decoupled server architecture interacting via `Cache` interface
+- JSON request and response payloads with validation and error formatting
+- CLI flags (`--port`, `--capacity`, `--policy`) and graceful shutdown on termination signals
