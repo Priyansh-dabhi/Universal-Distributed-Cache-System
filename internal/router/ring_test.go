@@ -375,8 +375,8 @@ func TestConcurrentRingAccess(t *testing.T) {
 	var writerWg sync.WaitGroup
 	stopCh := make(chan struct{})
 
-	// 8 concurrent readers
-	for r := 0; r < 8; r++ {
+	// 100 concurrent readers
+	for r := 0; r < 100; r++ {
 		readerWg.Add(1)
 		go func(readerID int) {
 			defer readerWg.Done()
@@ -387,7 +387,10 @@ func TestConcurrentRingAccess(t *testing.T) {
 					return
 				default:
 					key := fmt.Sprintf("reader-%d-key-%d", readerID, i)
-					ring.GetNode(key)
+					node, ok := ring.GetNode(key)
+					if ok && node.ID == "" {
+						t.Errorf("empty node ID returned")
+					}
 					ring.Nodes()
 					i++
 				}
@@ -395,8 +398,8 @@ func TestConcurrentRingAccess(t *testing.T) {
 		}(r)
 	}
 
-	// 2 concurrent writers adding/removing dynamic nodes
-	for w := 0; w < 2; w++ {
+	// 4 concurrent writers adding/removing dynamic nodes
+	for w := 0; w < 4; w++ {
 		writerWg.Add(1)
 		go func(writerID int) {
 			defer writerWg.Done()
