@@ -93,7 +93,7 @@ func newTwoQCache(capacity, a1Cap, amCap int) *twoQCache {
 	}
 }
 
-func (c *twoQCache) set(key string, value string, expiresAt time.Time) {
+func (c *twoQCache) set(key string, value string, expiresAt time.Time) bool {
 	if node, ok := c.items[key]; ok {
 		node.value = value
 		node.expiresAt = expiresAt
@@ -104,21 +104,25 @@ func (c *twoQCache) set(key string, value string, expiresAt time.Time) {
 			// Updating an existing Am key: move to MRU
 			c.am.moveToFront(node)
 		}
-		return
+		return false
 	}
 
+	var evicted bool
 	// New key: insert into A1.
 	// If A1 is full, evict oldest from A1
 	if c.a1.len >= c.a1Cap {
 		c.evictA1()
+		evicted = true
 	}
 
 	// If overall cache capacity is reached, evict to maintain bounds
 	if len(c.items) >= c.capacity {
 		if c.a1.len > 0 {
 			c.evictA1()
+			evicted = true
 		} else if c.am.len > 0 {
 			c.evictAm()
+			evicted = true
 		}
 	}
 
@@ -130,17 +134,18 @@ func (c *twoQCache) set(key string, value string, expiresAt time.Time) {
 	}
 	c.items[key] = newNode
 	c.a1.pushFront(newNode)
+	return evicted
 }
 
-func (c *twoQCache) get(key string) (string, bool) {
+func (c *twoQCache) get(key string) (string, bool, bool) {
 	node, ok := c.items[key]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 
 	if node.isExpired(time.Now()) {
 		c.removeNode(node)
-		return "", false
+		return "", false, true
 	}
 
 	if node.qType == queueA1 {
@@ -151,7 +156,7 @@ func (c *twoQCache) get(key string) (string, bool) {
 		c.am.moveToFront(node)
 	}
 
-	return node.value, true
+	return node.value, true, false
 }
 
 func (c *twoQCache) promoteToAm(node *twoQNode) {
@@ -187,18 +192,18 @@ func (c *twoQCache) removeNode(node *twoQNode) {
 	}
 }
 
-func (c *twoQCache) delete(key string) bool {
+func (c *twoQCache) delete(key string) (bool, bool) {
 	node, ok := c.items[key]
 	if !ok {
-		return false
+		return false, false
 	}
 
 	expired := node.isExpired(time.Now())
 	c.removeNode(node)
 	if expired {
-		return false
+		return false, true
 	}
-	return true
+	return true, false
 }
 
 func (c *twoQCache) size() int {
