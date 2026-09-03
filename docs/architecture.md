@@ -1,22 +1,32 @@
 # Architecture
 
-## Current Architecture (Phase 2 — In-Memory Cache with LRU Eviction)
+## Current Architecture (Phase 3 — In-Memory Cache with Configurable LRU & LFU)
 
-At present, the system implements a standalone, thread-safe in-memory key-value cache with an LRU (Least Recently Used) eviction policy:
+At present, the system implements a standalone, thread-safe in-memory key-value cache with pluggable eviction policies (LRU and LFU):
 
 ```text
-Application
-     |
-     v
-   Cache
-  /     \
-Map     LRU List
+                    Cache
+                      |
+              Eviction Policy
+                 /         \
+                /           \
+              LRU           LFU
+                              |
+                     Frequency Buckets
 ```
 
-- **Map (`map[string]*node`)**: Provides $O(1)$ key-to-node index lookups.
-- **LRU List (Doubly Linked List)**: Maintains recency ordering between a sentinel `head` (MRU) and `tail` (LRU) with $O(1)$ updates and evictions.
+### Components
 
-Eviction policies (LFU, 2Q), expiration (TTL), and distributed components (HTTP routing, consistent hashing, clustering, replication) are planned for subsequent phases.
+* **Cache Coordinator**: Wraps operations with `sync.RWMutex`, exposes the unified cache API (`Set`, `Get`, `Delete`, `Size`), and delegates storage/eviction to the configured policy.
+* **LRU (Least Recently Used)**:
+  - Backed by `map[string]*lruNode` and a doubly linked list.
+  - Promotes accessed entries to the head (MRU); evicts from the tail (LRU) in $O(1)$ time.
+* **LFU (Least Frequently Used)**:
+  - Backed by `map[string]*lfuNode` and `freqBuckets map[int]*lfuList`.
+  - Tracks `minFreq` for instantaneous $O(1)$ identification of the lowest frequency bucket.
+  - Resolves ties via LRU ordering within each frequency bucket's doubly linked list.
+
+> **Note**: 2Q eviction, expiration (TTL), HTTP routing, consistent hashing, and multi-node clustering are planned for subsequent phases and are **not yet implemented**.
 
 ---
 
@@ -59,6 +69,6 @@ For the eviction layer, the design will eventually support:
 Cache Engine
     |
     +-- LRU (Implemented)
-    +-- LFU (Planned)
+    +-- LFU (Implemented)
     +-- 2Q  (Planned)
 ```
