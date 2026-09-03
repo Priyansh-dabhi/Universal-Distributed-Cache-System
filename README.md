@@ -18,10 +18,6 @@ A lightweight distributed in-memory caching system built in Go.
 * LFU (Implemented)
 * 2Q (Implemented)
 
-## Planned Architecture
-
-Client → Router → Cache Nodes
-
 ## Status
 
 ```text
@@ -32,85 +28,99 @@ Phase 4 — 2Q                      ✓
 Phase 5 — TTL                     ✓
 Phase 6 — HTTP API                ✓
 Phase 7 — Multiple Cache Nodes    ✓
-Phase 8 — Router                  Planned
+Phase 8 — Router                  ✓
+Phase 9 — Consistent Hashing      Planned
 ```
 
 ---
 
-## Running Multiple Nodes
+## Distributed Cluster Setup
 
-Multiple independent cache nodes can be executed simultaneously as distinct processes with isolated in-memory stores and independent eviction configurations:
+Run multiple independent cache nodes alongside a central routing proxy:
 
 ```bash
+# 1. Start Cache Nodes
 go run ./cmd/cache-server --id node-1 --port 8001 --policy lru
 go run ./cmd/cache-server --id node-2 --port 8002 --policy lfu
 go run ./cmd/cache-server --id node-3 --port 8003 --policy 2q
+
+# 2. Start Distributed Router
+go run ./cmd/router \
+  --port 9000 \
+  --nodes node-1=http://localhost:8001,node-2=http://localhost:8002,node-3=http://localhost:8003
 ```
 
-> **Important**: Each node currently maintains an independent in-memory cache. Requests are not automatically distributed between nodes yet.
+Clients interact exclusively with the router at `http://localhost:9000`.
 
 ---
 
-## HTTP REST API
+## Distributed Request Flow
 
-The cache server exposes a REST API powered by Go's standard library `net/http`.
+```text
+Client
+  │
+  ▼
+Router (:9000)
+  │
+  ▼
+hash(key) % N
+  │
+  ▼
+Selected Cache Node (:8001, :8002, or :8003)
+  │
+  ▼
+Cache Engine
+```
+
+> **Important Limitation**: The current router uses simple modulo hashing: $\text{hash}(\text{key}) \pmod N$. Adding or removing nodes, or altering the node list ordering, can cause many keys to remap to different nodes. Phase 9 replaces this mechanism with consistent hashing.
+
+---
+
+## Router HTTP REST API
+
+The router exposes a unified REST interface identical to individual cache nodes, plus node inspection endpoints:
 
 ### Endpoints
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| **`GET`** | `/health` | Health check endpoint returning status and `node_id` |
-| **`GET`** | `/node` | Static node configuration (`id`, `host`, `port`, `capacity`, `policy`) |
-| **`GET`** | `/cache` | Current cache metrics (`size`, `capacity`, `policy`) |
-| **`PUT`** | `/cache/{key}` | Store a key-value entry (supports optional `ttl` duration) |
-| **`GET`** | `/cache/{key}` | Retrieve an entry by key (returns 404 on miss or expiration) |
-| **`DELETE`** | `/cache/{key}` | Remove an entry by key (returns 404 if missing or expired) |
+| **`GET`** | `/health` | Router health check returning `{"status": "ok"}` |
+| **`GET`** | `/nodes` | List of all configured backend cache nodes and their addresses |
+| **`PUT`** | `/cache/{key}` | Deterministically route and store entry on owning cache node |
+| **`GET`** | `/cache/{key}` | Deterministically route and retrieve entry from owning cache node |
+| **`DELETE`** | `/cache/{key}` | Deterministically route and remove entry from owning cache node |
 
-### cURL Examples
+### cURL Examples via Router
 
-#### 1. Health Check
+#### 1. Router Health
 ```bash
-curl http://localhost:8001/health
-# Response: {"status":"ok","node_id":"node-1"}
+curl http://localhost:9000/health
+# Response: {"status":"ok"}
 ```
 
-#### 2. Node Information
+#### 2. Configured Nodes
 ```bash
-curl http://localhost:8001/node
-# Response: {"id":"node-1","host":"127.0.0.1","port":8001,"capacity":100,"policy":"lru"}
+curl http://localhost:9000/nodes
+# Response: {"nodes":[{"id":"node-1","address":"http://localhost:8001"},{"id":"node-2","address":"http://localhost:8002"},{"id":"node-3","address":"http://localhost:8003"}]}
 ```
 
-#### 3. Set Entry (without TTL)
+#### 3. Store Key via Router
 ```bash
-curl -X PUT http://localhost:8001/cache/user:123 \
+curl -X PUT http://localhost:9000/cache/user:123 \
   -H "Content-Type: application/json" \
-  -d '{"value":"Priyansh"}'
+  -d '{"value":"Priyansh","ttl":"60s"}'
 # Response: {"message":"cache entry stored"}
 ```
 
-#### 4. Set Entry with TTL
+#### 4. Retrieve Key via Router
 ```bash
-curl -X PUT http://localhost:8001/cache/session:abc \
-  -H "Content-Type: application/json" \
-  -d '{"value":"active","ttl":"60s"}'
-# Response: {"message":"cache entry stored"}
-```
-
-#### 5. Get Entry
-```bash
-curl http://localhost:8001/cache/user:123
+curl http://localhost:9000/cache/user:123
 # Response: {"key":"user:123","value":"Priyansh"}
 ```
 
-#### 6. Cache Information
+#### 5. Delete Key via Router
 ```bash
-curl http://localhost:8001/cache
-# Response: {"size":2,"capacity":100,"policy":"lru"}
-```
-
-#### 7. Delete Entry
-```bash
-curl -X DELETE http://localhost:8001/cache/user:123
+curl -X DELETE http://localhost:9000/cache/user:123
 # Response: {"message":"cache entry deleted"}
 ```
 
@@ -199,6 +209,7 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 | **A1 eviction** | $O(1)$ | Unlink tail of A1 FIFO queue |
 | **Am eviction** | $O(1)$ | Unlink tail of Am LRU queue |
 | **Size** | $O(1)$ | Querying map length (expired entries cleaned up on access) |
+| **Routing** | $O(1)$ | FNV-1a hash calculation + modulo node count |
 
 ---
 
@@ -242,3 +253,9 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - Multi-process execution on distinct ports (e.g. `:8001`, `:8002`, `:8003`)
 - Strict memory isolation guaranteeing zero accidental state sharing between nodes
 - Dedicated `/node` endpoint and `node_id` reporting on `/health`
+
+### Phase 8 — Distributed Router with Hash-Based Routing
+- Central HTTP reverse proxy router dispatching client requests
+- Deterministic FNV-1a hashing with modulo node index selection: $\text{hash}(\text{key}) \pmod N$
+- Node registry with strict URL and ID validation
+- End-to-end transparent payload proxying with 502 bad gateway isolation on unreachable nodes
