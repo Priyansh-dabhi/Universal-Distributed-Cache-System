@@ -103,16 +103,18 @@ func (c *lfuCache) incrementFreq(n *lfuNode) {
 	newBucket.pushFront(n)
 }
 
-func (c *lfuCache) set(key string, value string, expiresAt time.Time) {
+func (c *lfuCache) set(key string, value string, expiresAt time.Time) bool {
 	if n, ok := c.items[key]; ok {
 		n.value = value
 		n.expiresAt = expiresAt
 		c.incrementFreq(n)
-		return
+		return false
 	}
 
+	var evicted bool
 	if len(c.items) >= c.capacity {
 		c.evict()
+		evicted = true
 	}
 
 	newNode := &lfuNode{
@@ -129,6 +131,7 @@ func (c *lfuCache) set(key string, value string, expiresAt time.Time) {
 	}
 	b1.pushFront(newNode)
 	c.minFreq = 1
+	return evicted
 }
 
 func (c *lfuCache) evict() {
@@ -169,33 +172,33 @@ func (c *lfuCache) removeNode(n *lfuNode) {
 	}
 }
 
-func (c *lfuCache) get(key string) (string, bool) {
+func (c *lfuCache) get(key string) (string, bool, bool) {
 	n, ok := c.items[key]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 
 	if n.isExpired(time.Now()) {
 		c.removeNode(n)
-		return "", false
+		return "", false, true
 	}
 
 	c.incrementFreq(n)
-	return n.value, true
+	return n.value, true, false
 }
 
-func (c *lfuCache) delete(key string) bool {
+func (c *lfuCache) delete(key string) (bool, bool) {
 	n, ok := c.items[key]
 	if !ok {
-		return false
+		return false, false
 	}
 
 	expired := n.isExpired(time.Now())
 	c.removeNode(n)
 	if expired {
-		return false
+		return false, true
 	}
-	return true
+	return true, false
 }
 
 func (c *lfuCache) size() int {
