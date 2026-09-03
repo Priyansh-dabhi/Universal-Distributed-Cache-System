@@ -1,20 +1,22 @@
 # Architecture
 
-## Current System (Phase 1)
+## Current Architecture (Phase 2 — In-Memory Cache with LRU Eviction)
 
-At present, the system implements a standalone, thread-safe in-memory key-value cache:
+At present, the system implements a standalone, thread-safe in-memory key-value cache with an LRU (Least Recently Used) eviction policy:
 
 ```text
 Application
      |
      v
    Cache
-     |
-     v
-In-Memory Map
+  /     \
+Map     LRU List
 ```
 
-Eviction policies (LRU, LFU, 2Q) and distributed components (HTTP routing, consistent hashing, clustering, replication) are planned for subsequent phases.
+- **Map (`map[string]*node`)**: Provides $O(1)$ key-to-node index lookups.
+- **LRU List (Doubly Linked List)**: Maintains recency ordering between a sentinel `head` (MRU) and `tail` (LRU) with $O(1)$ updates and evictions.
+
+Eviction policies (LFU, 2Q), expiration (TTL), and distributed components (HTTP routing, consistent hashing, clustering, replication) are planned for subsequent phases.
 
 ---
 
@@ -56,7 +58,7 @@ For the eviction layer, the design will eventually support:
 ```text
 Cache Engine
     |
-    +-- LRU
-    +-- LFU
-    +-- 2Q
+    +-- LRU (Implemented)
+    +-- LFU (Planned)
+    +-- 2Q  (Planned)
 ```
