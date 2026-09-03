@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"universal-distributed-cache/internal/metrics"
 )
 
 // ErrEmptyKey is returned when an empty key is provided for routing.
@@ -39,10 +41,22 @@ func DefaultConfig(port int) Config {
 	}
 }
 
+// statusResponseWriter captures HTTP status code written by router handlers for telemetry.
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *statusResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
 // Router dispatches client requests to appropriate backend cache nodes using consistent hashing.
 type Router struct {
 	cfg        Config
 	ring       *HashRing
+	metrics    *metrics.HTTPMetrics
 	client     *http.Client
 	httpServer *http.Server
 	handler    http.Handler
@@ -51,8 +65,9 @@ type Router struct {
 // New creates and initializes a new Router with the provided consistent HashRing and configuration.
 func New(ring *HashRing, cfg Config) *Router {
 	r := &Router{
-		cfg:  cfg,
-		ring: ring,
+		cfg:     cfg,
+		ring:    ring,
+		metrics: metrics.NewHTTPMetrics(),
 		client: &http.Client{
 			Timeout: cfg.ClientTimeout,
 		},
@@ -110,6 +125,11 @@ func (r *Router) Nodes() []Node {
 	return r.ring.Nodes()
 }
 
+// Metrics returns the router's HTTP request telemetry.
+func (r *Router) Metrics() *metrics.HTTPMetrics {
+	return r.metrics
+}
+
 // Handler returns the HTTP handler for testing and routing.
 func (r *Router) Handler() http.Handler {
 	return r.handler
@@ -135,22 +155,37 @@ func (r *Router) Shutdown(ctx context.Context) error {
 
 func (r *Router) routes() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		start := time.Now()
+		srw := &statusResponseWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+		}
+
+		defer func() {
+			r.metrics.RecordRequest(srw.statusCode, time.Since(start))
+		}()
+
 		if req.URL.Path == "/health" {
-			r.handleHealth(w, req)
+			r.handleHealth(srw, req)
 			return
 		}
 
 		if req.URL.Path == "/nodes" {
-			r.handleNodes(w, req)
+			r.handleNodes(srw, req)
+			return
+		}
+
+		if req.URL.Path == "/metrics" {
+			r.handleMetrics(srw, req)
 			return
 		}
 
 		if strings.HasPrefix(req.URL.Path, "/cache/") {
-			r.handleCacheProxy(w, req)
+			r.handleCacheProxy(srw, req)
 			return
 		}
 
-		writeRouterError(w, http.StatusNotFound, "not found")
+		writeRouterError(srw, http.StatusNotFound, "not found")
 	})
 }
 
@@ -172,6 +207,23 @@ func (r *Router) handleNodes(w http.ResponseWriter, req *http.Request) {
 	writeRouterJSON(w, http.StatusOK, map[string]interface{}{
 		"nodes":    r.ring.Nodes(),
 		"replicas": r.ring.Replicas(),
+	})
+}
+
+func (r *Router) handleMetrics(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeRouterError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	snap := r.metrics.Snapshot()
+	writeRouterJSON(w, http.StatusOK, map[string]interface{}{
+		"requests":       snap.Requests,
+		"successes":      snap.Successes,
+		"errors_4xx":     snap.Errors4xx,
+		"errors_5xx":     snap.Errors5xx,
+		"avg_latency_ms": snap.AvgLatencyMs,
 	})
 }
 
@@ -228,7 +280,7 @@ func (r *Router) handleCacheProxy(w http.ResponseWriter, req *http.Request) {
 
 	resp, err := r.client.Do(outboundReq)
 	if err != nil {
-		// Node is unavailable or timed out; do NOT failover in Phase 9
+		// Node is unavailable or timed out; do NOT failover in Phase 10
 		writeRouterError(w, http.StatusBadGateway, "cache node unavailable")
 		return
 	}
