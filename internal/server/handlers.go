@@ -29,6 +29,15 @@ type deleteResponse struct {
 
 type healthResponse struct {
 	Status string `json:"status"`
+	NodeID string `json:"node_id,omitempty"`
+}
+
+type nodeInfoResponse struct {
+	ID       string `json:"id"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Capacity int    `json:"capacity"`
+	Policy   string `json:"policy"`
 }
 
 type cacheInfoResponse struct {
@@ -59,6 +68,12 @@ func (s *Server) routes() http.Handler {
 			return
 		}
 
+		// Node info endpoint
+		if r.URL.Path == "/node" {
+			s.handleNodeInfo(w, r)
+			return
+		}
+
 		// Cache info endpoint
 		if r.URL.Path == "/cache" {
 			s.handleCacheInfo(w, r)
@@ -82,7 +97,25 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+	writeJSON(w, http.StatusOK, healthResponse{
+		Status: "ok",
+		NodeID: s.cfg.NodeID,
+	})
+}
+
+func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, nodeInfoResponse{
+		ID:       s.cfg.NodeID,
+		Host:     s.cfg.Host,
+		Port:     s.cfg.Port,
+		Capacity: s.cache.Capacity(),
+		Policy:   strings.ToLower(string(s.cache.Policy())),
+	})
 }
 
 func (s *Server) handleCacheInfo(w http.ResponseWriter, r *http.Request) {
