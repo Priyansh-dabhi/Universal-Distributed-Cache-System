@@ -65,17 +65,19 @@ func (l *lruCache) removeLRU() *lruNode {
 	return lru
 }
 
-func (l *lruCache) set(key string, value string, expiresAt time.Time) {
+func (l *lruCache) set(key string, value string, expiresAt time.Time) bool {
 	if n, ok := l.items[key]; ok {
 		n.value = value
 		n.expiresAt = expiresAt
 		l.moveToFront(n)
-		return
+		return false
 	}
 
+	var evicted bool
 	if len(l.items) >= l.capacity {
 		if lru := l.removeLRU(); lru != nil {
 			delete(l.items, lru.key)
+			evicted = true
 		}
 	}
 
@@ -86,36 +88,38 @@ func (l *lruCache) set(key string, value string, expiresAt time.Time) {
 	}
 	l.addToFront(newNode)
 	l.items[key] = newNode
+	return evicted
 }
 
-func (l *lruCache) get(key string) (string, bool) {
+func (l *lruCache) get(key string) (string, bool, bool) {
 	n, ok := l.items[key]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 
 	if n.isExpired(time.Now()) {
 		l.removeNode(n)
 		delete(l.items, key)
-		return "", false
+		return "", false, true
 	}
 
 	l.moveToFront(n)
-	return n.value, true
+	return n.value, true, false
 }
 
-func (l *lruCache) delete(key string) bool {
+func (l *lruCache) delete(key string) (bool, bool) {
 	n, ok := l.items[key]
 	if !ok {
-		return false
+		return false, false
 	}
 
+	expired := n.isExpired(time.Now())
 	l.removeNode(n)
 	delete(l.items, key)
-	if n.isExpired(time.Now()) {
-		return false
+	if expired {
+		return false, true
 	}
-	return true
+	return true, false
 }
 
 func (l *lruCache) size() int {
