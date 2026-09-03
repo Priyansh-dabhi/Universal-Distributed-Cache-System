@@ -515,3 +515,196 @@ func TestMultipleKeysIntegration(t *testing.T) {
 		}
 	}
 }
+
+func TestRouterMetricsEndpoint(t *testing.T) {
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: "http://127.0.0.1:59999"})
+	r := New(ring, DefaultConfig(9000))
+	routerServer := httptest.NewServer(r.Handler())
+	defer routerServer.Close()
+
+	client := routerServer.Client()
+
+	// 1. Initial GET /metrics
+	res, err := client.Get(routerServer.URL + "/metrics")
+	if err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("failed initial GET /metrics: %v", err)
+	}
+	_ = res.Body.Close()
+
+	// 2. Perform operations:
+	// GET /health -> 200 (success)
+	hResp, _ := client.Get(routerServer.URL + "/health")
+	_ = hResp.Body.Close()
+
+	// POST /health -> 405 (4xx error)
+	postReq, _ := http.NewRequest(http.MethodPost, routerServer.URL+"/health", nil)
+	postResp, _ := client.Do(postReq)
+	_ = postResp.Body.Close()
+
+	// GET /cache/test -> 502 (node unreachable -> 5xx error)
+	cResp, _ := client.Get(routerServer.URL + "/cache/test")
+	_ = cResp.Body.Close()
+
+	// 3. Inspect /metrics
+	mResp, err := client.Get(routerServer.URL + "/metrics")
+	if err != nil || mResp.StatusCode != http.StatusOK {
+		t.Fatalf("failed GET /metrics: %v", err)
+	}
+	defer mResp.Body.Close()
+
+	var mData map[string]interface{}
+	if err := json.NewDecoder(mResp.Body).Decode(&mData); err != nil {
+		t.Fatalf("failed to decode router metrics: %v", err)
+	}
+
+	// Requests: initial /metrics + /health + post /health + /cache/test + second /metrics = 5
+	if reqs, ok := mData["requests"].(float64); !ok || reqs < 4 {
+		t.Errorf("expected at least 4 requests, got %v", mData["requests"])
+	}
+	if errors4xx, ok := mData["errors_4xx"].(float64); !ok || errors4xx < 1 {
+		t.Errorf("expected at least 1 4xx error, got %v", mData["errors_4xx"])
+	}
+	if errors5xx, ok := mData["errors_5xx"].(float64); !ok || errors5xx < 1 {
+		t.Errorf("expected at least 1 5xx error, got %v", mData["errors_5xx"])
+	}
+	if avgLat, ok := mData["avg_latency_ms"].(float64); !ok || avgLat < 0 {
+		t.Errorf("expected non-negative avg latency, got %v", mData["avg_latency_ms"])
+	}
+}
+
+func BenchmarkRouterProxy(b *testing.B) {
+	n, _ := node.New(node.Config{ID: "node-1", Host: "127.0.0.1", Port: 18001, Capacity: 100, Policy: "lru"})
+	backendServer := httptest.NewServer(n.Server().Handler())
+	defer backendServer.Close()
+
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: backendServer.URL})
+	r := New(ring, DefaultConfig(9000))
+	routerServer := httptest.NewServer(r.Handler())
+	defer routerServer.Close()
+
+	client := routerServer.Client()
+
+	// Pre-populate key
+	putReq, _ := http.NewRequest(http.MethodPut, routerServer.URL+"/cache/bench-key", bytes.NewBufferString(`{"value":"bench-val"}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	resp, _ := client.Do(putReq)
+	_ = resp.Body.Close()
+
+	getURL := routerServer.URL + "/cache/bench-key"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := client.Get(getURL)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+}
+
+// TestClusterMetricsIntegration verifies end-to-end telemetry across a 3-node cluster and router.
+func TestClusterMetricsIntegration(t *testing.T) {
+	n1, _ := node.New(node.Config{ID: "node-1", Host: "127.0.0.1", Port: 18001, Capacity: 50, Policy: "lru"})
+	n2, _ := node.New(node.Config{ID: "node-2", Host: "127.0.0.1", Port: 18002, Capacity: 50, Policy: "lfu"})
+	n3, _ := node.New(node.Config{ID: "node-3", Host: "127.0.0.1", Port: 18003, Capacity: 50, Policy: "2q"})
+
+	s1 := httptest.NewServer(n1.Server().Handler())
+	defer s1.Close()
+	s2 := httptest.NewServer(n2.Server().Handler())
+	defer s2.Close()
+	s3 := httptest.NewServer(n3.Server().Handler())
+	defer s3.Close()
+
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: s1.URL})
+	_ = ring.AddNode(Node{ID: "node-2", Address: s2.URL})
+	_ = ring.AddNode(Node{ID: "node-3", Address: s3.URL})
+
+	r := New(ring, DefaultConfig(9000))
+	routerServer := httptest.NewServer(r.Handler())
+	defer routerServer.Close()
+
+	client := routerServer.Client()
+
+	// 1. PUT user:1, user:2, user:3
+	for _, key := range []string{"user:1", "user:2", "user:3"} {
+		putReq, _ := http.NewRequest(http.MethodPut, routerServer.URL+"/cache/"+key, bytes.NewBufferString(`{"value":"test-val"}`))
+		putReq.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(putReq)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT failed for %s: %v", key, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	// 2. GET user:1, user:2 (hits)
+	for _, key := range []string{"user:1", "user:2"} {
+		resp, err := client.Get(routerServer.URL + "/cache/" + key)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET failed for %s (status %d, err %v)", key, resp.StatusCode, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	// 3. GET missing (miss -> 404)
+	mResp, err := client.Get(routerServer.URL + "/cache/missing")
+	if err != nil || mResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 on missing, got %d", mResp.StatusCode)
+	}
+	_ = mResp.Body.Close()
+
+	// 4. DELETE user:3
+	dReq, _ := http.NewRequest(http.MethodDelete, routerServer.URL+"/cache/user:3", nil)
+	dResp, err := client.Do(dReq)
+	if err != nil || dResp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE user:3 failed: %v", err)
+	}
+	_ = dResp.Body.Close()
+
+	// 5. Inspect Router /metrics
+	rMetricsResp, err := client.Get(routerServer.URL + "/metrics")
+	if err != nil || rMetricsResp.StatusCode != http.StatusOK {
+		t.Fatalf("failed GET router /metrics: %v", err)
+	}
+	var rMetrics map[string]interface{}
+	_ = json.NewDecoder(rMetricsResp.Body).Decode(&rMetrics)
+	_ = rMetricsResp.Body.Close()
+
+	// 3 PUTs + 2 GETs + 1 missing GET + 1 DELETE = 7 cache proxy requests
+	if rMetrics["requests"].(float64) < 7 {
+		t.Fatalf("expected at least 7 router requests, got %v", rMetrics["requests"])
+	}
+	if rMetrics["errors_4xx"].(float64) != 1 {
+		t.Fatalf("expected 1 4xx error on router, got %v", rMetrics["errors_4xx"])
+	}
+
+	// 6. Inspect Node metrics across all 3 nodes
+	var totalHits, totalMisses, totalSets, totalDeletes float64
+	for _, nodeURL := range []string{s1.URL, s2.URL, s3.URL} {
+		nResp, err := http.Get(nodeURL + "/metrics")
+		if err != nil || nResp.StatusCode != http.StatusOK {
+			t.Fatalf("failed GET node /metrics for %s: %v", nodeURL, err)
+		}
+		var nData map[string]interface{}
+		_ = json.NewDecoder(nResp.Body).Decode(&nData)
+		_ = nResp.Body.Close()
+
+		totalHits += nData["hits"].(float64)
+		totalMisses += nData["misses"].(float64)
+		totalSets += nData["sets"].(float64)
+		totalDeletes += nData["deletes"].(float64)
+	}
+
+	if totalHits != 2 {
+		t.Errorf("expected 2 total hits across nodes, got %f", totalHits)
+	}
+	if totalMisses != 1 {
+		t.Errorf("expected 1 total miss across nodes, got %f", totalMisses)
+	}
+	if totalSets != 3 {
+		t.Errorf("expected 3 total sets across nodes, got %f", totalSets)
+	}
+	if totalDeletes != 1 {
+		t.Errorf("expected 1 total delete across nodes, got %f", totalDeletes)
+	}
+}
