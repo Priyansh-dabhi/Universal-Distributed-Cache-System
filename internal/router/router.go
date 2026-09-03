@@ -39,22 +39,20 @@ func DefaultConfig(port int) Config {
 	}
 }
 
-// Router dispatches client requests to appropriate backend cache nodes using hash-based routing.
+// Router dispatches client requests to appropriate backend cache nodes using consistent hashing.
 type Router struct {
 	cfg        Config
-	registry   *Registry
-	hasher     Hasher
+	ring       *HashRing
 	client     *http.Client
 	httpServer *http.Server
 	handler    http.Handler
 }
 
-// New creates and initializes a new Router with the provided registry, hasher, and configuration.
-func New(registry *Registry, hasher Hasher, cfg Config) *Router {
+// New creates and initializes a new Router with the provided consistent HashRing and configuration.
+func New(ring *HashRing, cfg Config) *Router {
 	r := &Router{
-		cfg:      cfg,
-		registry: registry,
-		hasher:   hasher,
+		cfg:  cfg,
+		ring: ring,
 		client: &http.Client{
 			Timeout: cfg.ClientTimeout,
 		},
@@ -77,31 +75,39 @@ func New(registry *Registry, hasher Hasher, cfg Config) *Router {
 	return r
 }
 
-// Route computes the deterministic target node for a given key using modulo hashing: hash(key) % N.
+// NewWithRegistry initializes a Router by populating a new HashRing from a Registry.
+func NewWithRegistry(registry *Registry, hasher Hasher, cfg Config) *Router {
+	ring := NewHashRingWithHasher(DefaultReplicas, hasher)
+	if registry != nil {
+		for _, n := range registry.Nodes() {
+			_ = ring.AddNode(n)
+		}
+	}
+	return New(ring, cfg)
+}
+
+// Route computes the target backend node for a given key by querying the consistent HashRing.
 func (r *Router) Route(key string) (Node, error) {
 	if key == "" {
 		return Node{}, ErrEmptyKey
 	}
 
-	count := r.registry.Count()
-	if count == 0 {
+	targetNode, ok := r.ring.GetNode(key)
+	if !ok {
 		return Node{}, ErrNoNodes
 	}
 
-	hashVal := r.hasher.Hash(key)
-	index := int(hashVal % uint32(count))
-
-	return r.registry.GetNode(index)
+	return targetNode, nil
 }
 
-// Registry returns the router's active node registry.
-func (r *Router) Registry() *Registry {
-	return r.registry
+// Ring returns the router's underlying HashRing.
+func (r *Router) Ring() *HashRing {
+	return r.ring
 }
 
-// Hasher returns the router's key hashing mechanism.
-func (r *Router) Hasher() Hasher {
-	return r.hasher
+// Nodes returns a snapshot of physical nodes registered with the router.
+func (r *Router) Nodes() []Node {
+	return r.ring.Nodes()
 }
 
 // Handler returns the HTTP handler for testing and routing.
@@ -111,8 +117,8 @@ func (r *Router) Handler() http.Handler {
 
 // Start begins listening and serving HTTP requests.
 func (r *Router) Start() error {
-	log.Printf("Starting distributed cache router on %s:%d (nodes: %d)...",
-		r.cfg.Host, r.cfg.Port, r.registry.Count())
+	log.Printf("Starting distributed cache router on %s:%d (nodes: %d, replicas: %d)...",
+		r.cfg.Host, r.cfg.Port, r.ring.NodeCount(), r.ring.Replicas())
 	return r.httpServer.ListenAndServe()
 }
 
@@ -163,7 +169,10 @@ func (r *Router) handleNodes(w http.ResponseWriter, req *http.Request) {
 		writeRouterError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeRouterJSON(w, http.StatusOK, map[string][]Node{"nodes": r.registry.Nodes()})
+	writeRouterJSON(w, http.StatusOK, map[string]interface{}{
+		"nodes":    r.ring.Nodes(),
+		"replicas": r.ring.Replicas(),
+	})
 }
 
 func (r *Router) handleCacheProxy(w http.ResponseWriter, req *http.Request) {
@@ -193,6 +202,10 @@ func (r *Router) handleCacheProxy(w http.ResponseWriter, req *http.Request) {
 
 	targetNode, err := r.Route(key)
 	if err != nil {
+		if errors.Is(err, ErrNoNodes) {
+			writeRouterError(w, http.StatusServiceUnavailable, "no cache nodes available")
+			return
+		}
 		writeRouterError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -215,7 +228,7 @@ func (r *Router) handleCacheProxy(w http.ResponseWriter, req *http.Request) {
 
 	resp, err := r.client.Do(outboundReq)
 	if err != nil {
-		// Node is unavailable or timed out; do NOT failover in Phase 8
+		// Node is unavailable or timed out; do NOT failover in Phase 9
 		writeRouterError(w, http.StatusBadGateway, "cache node unavailable")
 		return
 	}
