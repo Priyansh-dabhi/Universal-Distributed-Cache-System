@@ -14,9 +14,14 @@ const (
 	PolicyLRU EvictionPolicy = "LRU"
 	// PolicyLFU uses the Least Frequently Used eviction strategy with LRU tie-breaking.
 	PolicyLFU EvictionPolicy = "LFU"
+	// Policy2Q uses the Two-Queue (2Q) eviction strategy separating new and frequent entries.
+	Policy2Q EvictionPolicy = "2Q"
 )
 
-// ErrInvalidCapacity is returned when attempting to initialize a Cache with capacity <= 0.
+// Default2QA1Ratio specifies the default percentage of total capacity allocated to queue A1 in 2Q.
+const Default2QA1Ratio = 0.25
+
+// ErrInvalidCapacity is returned when attempting to initialize a Cache with invalid capacity (<= 0).
 var ErrInvalidCapacity = errors.New("capacity must be greater than 0")
 
 // ErrUnsupportedPolicy is returned when an unrecognized EvictionPolicy is requested.
@@ -33,6 +38,14 @@ type storage interface {
 // frequencyTracker is implemented by eviction policies that track frequency (such as LFU).
 type frequencyTracker interface {
 	getFrequency(key string) (int, bool)
+}
+
+// twoQInspector is implemented by 2Q eviction policy for queue-specific introspection.
+type twoQInspector interface {
+	isInA1(key string) bool
+	isInAm(key string) bool
+	a1Size() int
+	amSize() int
 }
 
 // Cache represents an in-memory thread-safe key-value store supporting configurable eviction policies.
@@ -59,6 +72,40 @@ func NewLFU(capacity int) (*Cache, error) {
 	return NewWithPolicy(capacity, PolicyLFU)
 }
 
+// New2Q initializes and returns a new Cache instance with the 2Q eviction policy using default capacity ratio (25% A1, 75% Am).
+func New2Q(capacity int) (*Cache, error) {
+	return NewWithPolicy(capacity, Policy2Q)
+}
+
+// New2QWithCapacities initializes and returns a new Cache instance with 2Q eviction policy and custom A1 and Am queue capacities.
+func New2QWithCapacities(capacity, a1Cap, amCap int) (*Cache, error) {
+	if capacity <= 0 || a1Cap <= 0 || amCap <= 0 {
+		return nil, ErrInvalidCapacity
+	}
+
+	return &Cache{
+		capacity: capacity,
+		policy:   Policy2Q,
+		storage:  newTwoQCache(capacity, a1Cap, amCap),
+	}, nil
+}
+
+// calculate2QCapacities calculates the default A1 and Am capacities based on total capacity.
+func calculate2QCapacities(capacity int) (int, int) {
+	if capacity <= 1 {
+		return 1, 1
+	}
+	a1Cap := int(float64(capacity) * Default2QA1Ratio)
+	if a1Cap < 1 {
+		a1Cap = 1
+	}
+	amCap := capacity - a1Cap
+	if amCap < 1 {
+		amCap = 1
+	}
+	return a1Cap, amCap
+}
+
 // NewWithPolicy initializes and returns a new Cache instance with the specified eviction policy.
 func NewWithPolicy(capacity int, policy EvictionPolicy) (*Cache, error) {
 	if capacity <= 0 {
@@ -71,6 +118,9 @@ func NewWithPolicy(capacity int, policy EvictionPolicy) (*Cache, error) {
 		s = newLRUCache(capacity)
 	case PolicyLFU:
 		s = newLFUCache(capacity)
+	case Policy2Q:
+		a1Cap, amCap := calculate2QCapacities(capacity)
+		s = newTwoQCache(capacity, a1Cap, amCap)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedPolicy, policy)
 	}
@@ -90,7 +140,7 @@ func (c *Cache) Set(key string, value string) {
 	c.storage.set(key, value)
 }
 
-// Get retrieves the value associated with the given key and updates eviction recency/frequency.
+// Get retrieves the value associated with the given key and updates eviction recency/frequency/queue.
 // The second return value indicates whether the key was present in the cache.
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.Lock()
@@ -135,6 +185,50 @@ func (c *Cache) GetFrequency(key string) (int, bool) {
 		return ft.getFrequency(key)
 	}
 	return 0, false
+}
+
+// IsInA1 returns true if key is currently in queue A1 of a 2Q cache.
+func (c *Cache) IsInA1(key string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if tq, ok := c.storage.(twoQInspector); ok {
+		return tq.isInA1(key)
+	}
+	return false
+}
+
+// IsInAm returns true if key is currently in queue Am of a 2Q cache.
+func (c *Cache) IsInAm(key string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if tq, ok := c.storage.(twoQInspector); ok {
+		return tq.isInAm(key)
+	}
+	return false
+}
+
+// A1Size returns the number of entries currently stored in queue A1 of a 2Q cache.
+func (c *Cache) A1Size() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if tq, ok := c.storage.(twoQInspector); ok {
+		return tq.a1Size()
+	}
+	return 0
+}
+
+// AmSize returns the number of entries currently stored in queue Am of a 2Q cache.
+func (c *Cache) AmSize() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if tq, ok := c.storage.(twoQInspector); ok {
+		return tq.amSize()
+	}
+	return 0
 }
 
 // ContainsInLRUList returns whether a key is present in the LRU doubly linked list (used for test validation).

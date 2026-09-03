@@ -1,32 +1,39 @@
 # Architecture
 
-## Current Architecture (Phase 3 — In-Memory Cache with Configurable LRU & LFU)
+## Current Architecture (Phase 4 — In-Memory Cache with Pluggable LRU, LFU, and 2Q)
 
-At present, the system implements a standalone, thread-safe in-memory key-value cache with pluggable eviction policies (LRU and LFU):
+At present, the system implements a standalone, thread-safe in-memory key-value cache supporting three configurable eviction policies (LRU, LFU, and 2Q):
 
 ```text
-                    Cache
-                      |
-              Eviction Policy
-                 /         \
-                /           \
-              LRU           LFU
-                              |
-                     Frequency Buckets
+                       Cache
+                         |
+                 Eviction Policy
+                  /      |      \
+                 /       |       \
+               LRU      LFU      2Q
+                                  |
+                         ┌────────┴────────┐
+                         ↓                 ↓
+                        A1                 Am
+                       FIFO               LRU
 ```
 
 ### Components
 
-* **Cache Coordinator**: Wraps operations with `sync.RWMutex`, exposes the unified cache API (`Set`, `Get`, `Delete`, `Size`), and delegates storage/eviction to the configured policy.
+* **Cache Coordinator**: Exposes the unified public API (`Set`, `Get`, `Delete`, `Size`, `Capacity`, `Policy`) and guards all operations with `sync.RWMutex`.
 * **LRU (Least Recently Used)**:
   - Backed by `map[string]*lruNode` and a doubly linked list.
   - Promotes accessed entries to the head (MRU); evicts from the tail (LRU) in $O(1)$ time.
 * **LFU (Least Frequently Used)**:
   - Backed by `map[string]*lfuNode` and `freqBuckets map[int]*lfuList`.
-  - Tracks `minFreq` for instantaneous $O(1)$ identification of the lowest frequency bucket.
+  - Tracks `minFreq` for instantaneous $O(1)$ identification of the lowest-frequency bucket.
   - Resolves ties via LRU ordering within each frequency bucket's doubly linked list.
+* **2Q (Two-Queue)**:
+  - Backed by `map[string]*twoQNode` and two distinct doubly linked lists (`a1` and `am`).
+  - **A1 Queue (FIFO)**: Buffers newly admitted entries, evicting the oldest when A1 capacity is reached to mitigate scan pollution.
+  - **Am Queue (LRU)**: Stores entries that have proven utility through repeat access. Promoted entries are managed with strict LRU semantics.
 
-> **Note**: 2Q eviction, expiration (TTL), HTTP routing, consistent hashing, and multi-node clustering are planned for subsequent phases and are **not yet implemented**.
+> **Note**: Expiration (TTL), HTTP routing, consistent hashing, and multi-node clustering are planned for subsequent phases and are **not yet implemented**.
 
 ---
 
@@ -63,12 +70,12 @@ The distributed system will eventually consist of a routing layer distributing r
 * **Concurrency**: Thread-safe operations across readers and writers.
 * **Future Replication / Failover**: Redundant data replication and automatic failover handling.
 
-For the eviction layer, the design will eventually support:
+For the eviction layer, the system currently supports:
 
 ```text
 Cache Engine
     |
     +-- LRU (Implemented)
     +-- LFU (Implemented)
-    +-- 2Q  (Planned)
+    +-- 2Q  (Implemented)
 ```

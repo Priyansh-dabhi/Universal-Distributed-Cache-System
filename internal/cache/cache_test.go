@@ -733,3 +733,382 @@ func TestLFUConcurrentAccess(t *testing.T) {
 		t.Fatalf("final LFU size %d exceeded capacity %d", c.Size(), capacity)
 	}
 }
+
+// -----------------------------------------------------------------------------
+// Phase 4 2Q Tests
+// -----------------------------------------------------------------------------
+
+func mustNew2Q(t *testing.T, capacity int) *Cache {
+	t.Helper()
+	c, err := New2Q(capacity)
+	if err != nil {
+		t.Fatalf("unexpected error creating 2Q cache: %v", err)
+	}
+	return c
+}
+
+func mustNew2QWithCapacities(t *testing.T, capacity, a1Cap, amCap int) *Cache {
+	t.Helper()
+	c, err := New2QWithCapacities(capacity, a1Cap, amCap)
+	if err != nil {
+		t.Fatalf("unexpected error creating 2Q cache with capacities: %v", err)
+	}
+	return c
+}
+
+// 2Q Test 1 — New entries enter A1
+func Test2QNewEntriesEnterA1(t *testing.T) {
+	c := mustNew2Q(t, 4)
+
+	c.Set("A", "100")
+
+	if !c.IsInA1("A") {
+		t.Fatalf("expected 'A' to be in queue A1")
+	}
+	if c.IsInAm("A") {
+		t.Fatalf("expected 'A' NOT to be in queue Am")
+	}
+	if c.A1Size() != 1 {
+		t.Fatalf("expected A1 size 1, got %d", c.A1Size())
+	}
+	if c.AmSize() != 0 {
+		t.Fatalf("expected Am size 0, got %d", c.AmSize())
+	}
+}
+
+// 2Q Test 2 — Second access promotes to Am
+func Test2QSecondAccessPromotesToAm(t *testing.T) {
+	c := mustNew2Q(t, 4)
+
+	c.Set("A", "100")
+	val, ok := c.Get("A")
+	if !ok || val != "100" {
+		t.Fatalf("expected Get('A') to return '100', true")
+	}
+
+	if c.IsInA1("A") {
+		t.Fatalf("expected 'A' to no longer be in queue A1 after second access")
+	}
+	if !c.IsInAm("A") {
+		t.Fatalf("expected 'A' to be promoted to queue Am")
+	}
+	if c.A1Size() != 0 {
+		t.Fatalf("expected A1 size 0, got %d", c.A1Size())
+	}
+	if c.AmSize() != 1 {
+		t.Fatalf("expected Am size 1, got %d", c.AmSize())
+	}
+}
+
+// 2Q Test 3 — One-time entries are evicted from A1
+func Test2QOneTimeEntriesEvictedFromA1(t *testing.T) {
+	// Total capacity = 4, A1 capacity = 2, Am capacity = 2
+	c := mustNew2QWithCapacities(t, 4, 2, 2)
+
+	c.Set("A", "1")
+	c.Set("B", "2")
+	c.Set("C", "3") // A1 capacity is 2, so oldest entry 'A' must be evicted
+
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected oldest A1 entry 'A' to be evicted")
+	}
+	if val, ok := c.Get("B"); !ok || val != "2" {
+		t.Fatalf("expected 'B' to remain in cache")
+	}
+	if val, ok := c.Get("C"); !ok || val != "3" {
+		t.Fatalf("expected 'C' to remain in cache")
+	}
+}
+
+// 2Q Test 4 — Frequently reused item survives
+func Test2QFrequentlyReusedItemSurvives(t *testing.T) {
+	// Total capacity = 4, A1 capacity = 2, Am capacity = 2
+	c := mustNew2QWithCapacities(t, 4, 2, 2)
+
+	c.Set("A", "1")
+	c.Get("A") // Promotes A to Am
+
+	if !c.IsInAm("A") {
+		t.Fatalf("expected 'A' to be promoted to Am")
+	}
+
+	// Insert items into A1 that exceed A1 capacity
+	c.Set("B", "2")
+	c.Set("C", "3")
+	c.Set("D", "4") // Evicts B from A1
+
+	// A in Am must survive!
+	val, ok := c.Get("A")
+	if !ok || val != "1" {
+		t.Fatalf("expected promoted item 'A' in Am to survive A1 churn")
+	}
+	if !c.IsInAm("A") {
+		t.Fatalf("expected 'A' to remain in Am")
+	}
+}
+
+// 2Q Test 5 — Am uses LRU behavior
+func Test2QAmUsesLRUBehavior(t *testing.T) {
+	// Total capacity = 3, A1 capacity = 1, Am capacity = 2
+	c := mustNew2QWithCapacities(t, 3, 1, 2)
+
+	// Promote A and B to Am
+	c.Set("A", "1")
+	c.Get("A") // A in Am
+
+	c.Set("B", "2")
+	c.Get("B") // B in Am (MRU in Am)
+
+	// Access A again -> A becomes MRU in Am, B becomes LRU in Am
+	c.Get("A")
+
+	// Insert C and promote C to Am -> Am is at capacity (2), so LRU (B) must be evicted from Am
+	c.Set("C", "3")
+	c.Get("C") // Promotes C to Am
+
+	if _, ok := c.Get("B"); ok {
+		t.Fatalf("expected 'B' to be evicted from Am as least recently used")
+	}
+
+	for _, key := range []string{"A", "C"} {
+		if val, ok := c.Get(key); !ok {
+			t.Fatalf("expected key %q to survive in Am", key)
+		} else if key == "A" && val != "1" {
+			t.Fatalf("expected 'A' value '1', got %q", val)
+		}
+	}
+}
+
+// 2Q Test 6 — SET existing A1 entry
+func Test2QSetExistingA1Entry(t *testing.T) {
+	c := mustNew2Q(t, 4)
+
+	c.Set("A", "old_val")
+	if !c.IsInA1("A") {
+		t.Fatalf("expected 'A' in A1 initially")
+	}
+
+	// SET of existing key counts as access: updates value and promotes to Am
+	c.Set("A", "new_val")
+
+	if c.IsInA1("A") {
+		t.Fatalf("expected 'A' to be promoted out of A1 after update SET")
+	}
+	if !c.IsInAm("A") {
+		t.Fatalf("expected 'A' to be in Am after update SET")
+	}
+
+	val, ok := c.Get("A")
+	if !ok || val != "new_val" {
+		t.Fatalf("expected value 'new_val', got %q", val)
+	}
+}
+
+// 2Q Test 7 — SET existing Am entry
+func Test2QSetExistingAmEntry(t *testing.T) {
+	// Total capacity = 3, A1 = 1, Am = 2
+	c := mustNew2QWithCapacities(t, 3, 1, 2)
+
+	c.Set("A", "1")
+	c.Get("A") // A in Am
+
+	c.Set("B", "2")
+	c.Get("B") // B in Am (MRU), A is LRU in Am
+
+	// Update existing Am entry A: updates value and moves A to MRU
+	c.Set("A", "100")
+
+	// Now promote C into Am: should evict B (the LRU item), while A survives
+	c.Set("C", "3")
+	c.Get("C")
+
+	if _, ok := c.Get("B"); ok {
+		t.Fatalf("expected 'B' to be evicted from Am")
+	}
+
+	val, ok := c.Get("A")
+	if !ok || val != "100" {
+		t.Fatalf("expected 'A' to have updated value '100', got %q", val)
+	}
+}
+
+// 2Q Test 8 — DELETE from A1
+func Test2QDeleteFromA1(t *testing.T) {
+	c := mustNew2Q(t, 4)
+
+	c.Set("A", "1")
+	if !c.IsInA1("A") {
+		t.Fatalf("expected 'A' in A1")
+	}
+
+	deleted := c.Delete("A")
+	if !deleted {
+		t.Fatalf("expected Delete('A') to return true")
+	}
+
+	if c.IsInA1("A") {
+		t.Fatalf("expected 'A' to be removed from A1")
+	}
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected Get('A') to return false")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// 2Q Test 9 — DELETE from Am
+func Test2QDeleteFromAm(t *testing.T) {
+	c := mustNew2Q(t, 4)
+
+	c.Set("A", "1")
+	c.Get("A") // Promote to Am
+
+	if !c.IsInAm("A") {
+		t.Fatalf("expected 'A' in Am")
+	}
+
+	deleted := c.Delete("A")
+	if !deleted {
+		t.Fatalf("expected Delete('A') to return true")
+	}
+
+	if c.IsInAm("A") {
+		t.Fatalf("expected 'A' to be removed from Am")
+	}
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected Get('A') to return false")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// 2Q Test 10 — Capacity
+func Test2QCapacity(t *testing.T) {
+	capacity := 6
+	c := mustNew2Q(t, capacity)
+
+	for i := 0; i < 50; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		c.Set(key, fmt.Sprintf("val-%d", i))
+		if i%2 == 0 {
+			c.Get(key) // promotes some keys to Am
+		}
+		if c.A1Size()+c.AmSize() > capacity {
+			t.Fatalf("A1 size (%d) + Am size (%d) exceeded capacity (%d)", c.A1Size(), c.AmSize(), capacity)
+		}
+		if c.Size() > capacity {
+			t.Fatalf("Size() %d exceeded capacity %d", c.Size(), capacity)
+		}
+	}
+}
+
+// 2Q Test 11 — Capacity = 1
+func Test2QCapacityOne(t *testing.T) {
+	c := mustNew2Q(t, 1)
+
+	c.Set("A", "1")
+	if c.Size() != 1 {
+		t.Fatalf("expected size 1, got %d", c.Size())
+	}
+	if !c.IsInA1("A") {
+		t.Fatalf("expected 'A' in A1")
+	}
+
+	// GET promotes A to Am
+	val, ok := c.Get("A")
+	if !ok || val != "1" {
+		t.Fatalf("expected Get('A') to succeed")
+	}
+	if !c.IsInAm("A") {
+		t.Fatalf("expected 'A' promoted to Am")
+	}
+	if c.Size() != 1 {
+		t.Fatalf("expected size 1, got %d", c.Size())
+	}
+
+	// SET B: must evict A from Am to respect capacity = 1
+	c.Set("B", "2")
+	if c.Size() != 1 {
+		t.Fatalf("expected size 1 after setting B, got %d", c.Size())
+	}
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected 'A' to be evicted when capacity is 1")
+	}
+	if !c.IsInA1("B") {
+		t.Fatalf("expected 'B' in A1")
+	}
+}
+
+// 2Q Test 12 — Concurrent access
+func Test2QConcurrentAccess(t *testing.T) {
+	capacity := 20
+	c := mustNew2Q(t, capacity)
+	var wg sync.WaitGroup
+
+	numGoroutines := 50
+	operationsPerGoroutine := 200
+
+	// Spawn writers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%40)
+				val := fmt.Sprintf("val-%d-%d", workerID, j)
+				c.Set(key, val)
+			}
+		}(i)
+	}
+
+	// Spawn readers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%40)
+				_, _ = c.Get(key)
+			}
+		}()
+	}
+
+	// Spawn deleters
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%40)
+				_ = c.Delete(key)
+			}
+		}()
+	}
+
+	// Spawn queue inspectors
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				s := c.Size()
+				if s > capacity {
+					t.Errorf("2Q size %d exceeded capacity %d during concurrency", s, capacity)
+				}
+				key := fmt.Sprintf("key-%d", j%40)
+				_ = c.IsInA1(key)
+				_ = c.IsInAm(key)
+				_ = c.A1Size()
+				_ = c.AmSize()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if c.Size() > capacity {
+		t.Fatalf("final 2Q size %d exceeded capacity %d", c.Size(), capacity)
+	}
+}
