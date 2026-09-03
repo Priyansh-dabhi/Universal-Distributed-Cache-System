@@ -50,6 +50,17 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+// statusResponseWriter captures the HTTP status code written by handlers for telemetry.
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *statusResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -62,32 +73,48 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func (s *Server) routes() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		srw := &statusResponseWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+		}
+
+		defer func() {
+			s.httpMetrics.RecordRequest(srw.statusCode, time.Since(start))
+		}()
+
 		// Health check endpoint
 		if r.URL.Path == "/health" {
-			s.handleHealth(w, r)
+			s.handleHealth(srw, r)
 			return
 		}
 
 		// Node info endpoint
 		if r.URL.Path == "/node" {
-			s.handleNodeInfo(w, r)
+			s.handleNodeInfo(srw, r)
 			return
 		}
 
 		// Cache info endpoint
 		if r.URL.Path == "/cache" {
-			s.handleCacheInfo(w, r)
+			s.handleCacheInfo(srw, r)
+			return
+		}
+
+		// Metrics endpoint
+		if r.URL.Path == "/metrics" {
+			s.handleMetrics(srw, r)
 			return
 		}
 
 		// Cache entry endpoint
 		if strings.HasPrefix(r.URL.Path, "/cache/") {
-			s.handleCacheEntry(w, r)
+			s.handleCacheEntry(srw, r)
 			return
 		}
 
 		// Unmatched route
-		writeError(w, http.StatusNotFound, "not found")
+		writeError(srw, http.StatusNotFound, "not found")
 	})
 }
 
@@ -109,6 +136,7 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, nodeInfoResponse{
 		ID:       s.cfg.NodeID,
 		Host:     s.cfg.Host,
@@ -124,11 +152,47 @@ func (s *Server) handleCacheInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
 	writeJSON(w, http.StatusOK, cacheInfoResponse{
 		Size:     s.cache.Size(),
 		Capacity: s.cache.Capacity(),
 		Policy:   strings.ToLower(string(s.cache.Policy())),
 	})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	cacheSnap := s.cache.Metrics().Snapshot()
+	httpSnap := s.httpMetrics.Snapshot()
+
+	response := map[string]interface{}{
+		// Cache engine statistics
+		"hits":      cacheSnap.Hits,
+		"misses":    cacheSnap.Misses,
+		"hit_rate":  cacheSnap.HitRate,
+		"sets":      cacheSnap.Sets,
+		"deletes":   cacheSnap.Deletes,
+		"evictions": cacheSnap.Evictions,
+		"expired":   cacheSnap.Expired,
+
+		// Node HTTP statistics
+		"requests":       httpSnap.Requests,
+		"errors_4xx":     httpSnap.Errors4xx,
+		"errors_5xx":     httpSnap.Errors5xx,
+		"avg_latency_ms": httpSnap.AvgLatencyMs,
+
+		// Cache state
+		"policy":   strings.ToLower(string(s.cache.Policy())),
+		"capacity": s.cache.Capacity(),
+		"size":     s.cache.Size(),
+	}
+
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleCacheEntry(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +279,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, key string) {
 	deleted := s.cache.Delete(key)
 	if !deleted {
-		writeError(w, http.StatusNotFound, "key not found")
+		writeError(w, http.StatusNotFound, "cache miss")
 		return
 	}
 
