@@ -21,17 +21,21 @@ type Cache interface {
 	Policy() cache.EvictionPolicy
 }
 
-// Config contains configuration options for the HTTP server.
+// Config contains configuration options for the HTTP server and node identity.
 type Config struct {
+	NodeID       string
+	Host         string
 	Port         int
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
 }
 
-// DefaultConfig returns reasonable default timeouts for the cache HTTP server.
+// DefaultConfig returns reasonable default timeouts and configuration for the cache HTTP server.
 func DefaultConfig(port int) Config {
 	return Config{
+		NodeID:       "node-1",
+		Host:         "127.0.0.1",
 		Port:         port,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -54,9 +58,14 @@ func New(c Cache, cfg Config) *Server {
 		cfg:   cfg,
 	}
 
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	if cfg.Host != "" {
+		addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	}
+
 	s.handler = s.routes()
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         addr,
 		Handler:      s.handler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
@@ -84,4 +93,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Handler returns the server's http.Handler for testing purposes.
 func (s *Server) Handler() http.Handler {
 	return s.handler
+}
+
+// Config returns the server's configuration.
+func (s *Server) Config() Config {
+	return s.cfg
 }
