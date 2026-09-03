@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"universal-distributed-cache/internal/metrics"
 )
 
 // EvictionPolicy defines the type of eviction algorithm used by the Cache.
@@ -30,9 +32,9 @@ var ErrUnsupportedPolicy = errors.New("unsupported eviction policy")
 
 // storage is the internal interface implemented by cache eviction strategies.
 type storage interface {
-	get(key string) (string, bool)
-	set(key string, value string, expiresAt time.Time)
-	delete(key string) bool
+	get(key string) (val string, found bool, expired bool)
+	set(key string, value string, expiresAt time.Time) (evicted bool)
+	delete(key string) (deleted bool, expired bool)
 	size() int
 }
 
@@ -49,12 +51,14 @@ type twoQInspector interface {
 	amSize() int
 }
 
-// Cache represents an in-memory thread-safe key-value store supporting configurable eviction policies and TTL expiration.
+// Cache represents an in-memory thread-safe key-value store supporting configurable eviction policies,
+// TTL expiration, and atomic telemetry metrics.
 type Cache struct {
 	mu       sync.RWMutex
 	capacity int
 	policy   EvictionPolicy
 	storage  storage
+	metrics  *metrics.CacheMetrics
 }
 
 // New initializes and returns a new Cache instance defaulting to LRU eviction.
@@ -88,6 +92,7 @@ func New2QWithCapacities(capacity, a1Cap, amCap int) (*Cache, error) {
 		capacity: capacity,
 		policy:   Policy2Q,
 		storage:  newTwoQCache(capacity, a1Cap, amCap),
+		metrics:  metrics.NewCacheMetrics(),
 	}, nil
 }
 
@@ -130,7 +135,13 @@ func NewWithPolicy(capacity int, policy EvictionPolicy) (*Cache, error) {
 		capacity: capacity,
 		policy:   policy,
 		storage:  s,
+		metrics:  metrics.NewCacheMetrics(),
 	}, nil
+}
+
+// Metrics returns the CacheMetrics tracking instance for this cache.
+func (c *Cache) Metrics() *metrics.CacheMetrics {
+	return c.metrics
 }
 
 // Set stores a key-value pair in the cache without expiration.
@@ -139,7 +150,11 @@ func (c *Cache) Set(key string, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.storage.set(key, value, time.Time{})
+	evicted := c.storage.set(key, value, time.Time{})
+	c.metrics.IncSets()
+	if evicted {
+		c.metrics.IncEvictions()
+	}
 }
 
 // SetWithTTL stores a key-value pair in the cache with a Time-To-Live (TTL).
@@ -149,20 +164,42 @@ func (c *Cache) SetWithTTL(key string, value string, ttl time.Duration) {
 	defer c.mu.Unlock()
 
 	if ttl <= 0 {
-		c.storage.delete(key)
+		deleted, expired := c.storage.delete(key)
+		if deleted {
+			c.metrics.IncDeletes()
+		}
+		if expired {
+			c.metrics.IncExpired()
+		}
 		return
 	}
 
-	c.storage.set(key, value, time.Now().Add(ttl))
+	evicted := c.storage.set(key, value, time.Now().Add(ttl))
+	c.metrics.IncSets()
+	if evicted {
+		c.metrics.IncEvictions()
+	}
 }
 
 // Get retrieves the value associated with the given key and updates eviction recency/frequency/queue.
 // If the entry has expired, it is lazily removed and ("", false) is returned.
+// GET requires an exclusive lock because it mutates eviction recency/frequency/queue state or purges expired items.
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.storage.get(key)
+	val, found, expired := c.storage.get(key)
+	if expired {
+		c.metrics.IncExpired()
+		c.metrics.IncMisses()
+		return "", false
+	}
+	if !found {
+		c.metrics.IncMisses()
+		return "", false
+	}
+	c.metrics.IncHits()
+	return val, true
 }
 
 // Delete removes the key and its value from the cache and eviction metadata.
@@ -171,7 +208,14 @@ func (c *Cache) Delete(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.storage.delete(key)
+	deleted, expired := c.storage.delete(key)
+	if expired {
+		c.metrics.IncExpired()
+	}
+	if deleted {
+		c.metrics.IncDeletes()
+	}
+	return deleted
 }
 
 // Size returns the number of entries currently stored in the cache.
