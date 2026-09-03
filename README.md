@@ -31,8 +31,23 @@ Phase 3 — LFU                     ✓
 Phase 4 — 2Q                      ✓
 Phase 5 — TTL                     ✓
 Phase 6 — HTTP API                ✓
-Phase 7 — Multiple Cache Nodes    Planned
+Phase 7 — Multiple Cache Nodes    ✓
+Phase 8 — Router                  Planned
 ```
+
+---
+
+## Running Multiple Nodes
+
+Multiple independent cache nodes can be executed simultaneously as distinct processes with isolated in-memory stores and independent eviction configurations:
+
+```bash
+go run ./cmd/cache-server --id node-1 --port 8001 --policy lru
+go run ./cmd/cache-server --id node-2 --port 8002 --policy lfu
+go run ./cmd/cache-server --id node-3 --port 8003 --policy 2q
+```
+
+> **Important**: Each node currently maintains an independent in-memory cache. Requests are not automatically distributed between nodes yet.
 
 ---
 
@@ -44,8 +59,9 @@ The cache server exposes a REST API powered by Go's standard library `net/http`.
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| **`GET`** | `/health` | Health check endpoint returning `{"status": "ok"}` |
-| **`GET`** | `/cache` | Information about cache size, capacity, and eviction policy |
+| **`GET`** | `/health` | Health check endpoint returning status and `node_id` |
+| **`GET`** | `/node` | Static node configuration (`id`, `host`, `port`, `capacity`, `policy`) |
+| **`GET`** | `/cache` | Current cache metrics (`size`, `capacity`, `policy`) |
 | **`PUT`** | `/cache/{key}` | Store a key-value entry (supports optional `ttl` duration) |
 | **`GET`** | `/cache/{key}` | Retrieve an entry by key (returns 404 on miss or expiration) |
 | **`DELETE`** | `/cache/{key}` | Remove an entry by key (returns 404 if missing or expired) |
@@ -54,58 +70,49 @@ The cache server exposes a REST API powered by Go's standard library `net/http`.
 
 #### 1. Health Check
 ```bash
-curl http://localhost:8080/health
-# Response: {"status":"ok"}
+curl http://localhost:8001/health
+# Response: {"status":"ok","node_id":"node-1"}
 ```
 
-#### 2. Set Entry (without TTL)
+#### 2. Node Information
 ```bash
-curl -X PUT http://localhost:8080/cache/user:123 \
+curl http://localhost:8001/node
+# Response: {"id":"node-1","host":"127.0.0.1","port":8001,"capacity":100,"policy":"lru"}
+```
+
+#### 3. Set Entry (without TTL)
+```bash
+curl -X PUT http://localhost:8001/cache/user:123 \
   -H "Content-Type: application/json" \
   -d '{"value":"Priyansh"}'
 # Response: {"message":"cache entry stored"}
 ```
 
-#### 3. Set Entry with TTL
+#### 4. Set Entry with TTL
 ```bash
-curl -X PUT http://localhost:8080/cache/session:abc \
+curl -X PUT http://localhost:8001/cache/session:abc \
   -H "Content-Type: application/json" \
   -d '{"value":"active","ttl":"60s"}'
 # Response: {"message":"cache entry stored"}
 ```
 
-#### 4. Get Entry
+#### 5. Get Entry
 ```bash
-curl http://localhost:8080/cache/user:123
+curl http://localhost:8001/cache/user:123
 # Response: {"key":"user:123","value":"Priyansh"}
 ```
 
-#### 5. Cache Information
+#### 6. Cache Information
 ```bash
-curl http://localhost:8080/cache
+curl http://localhost:8001/cache
 # Response: {"size":2,"capacity":100,"policy":"lru"}
 ```
 
-#### 6. Delete Entry
+#### 7. Delete Entry
 ```bash
-curl -X DELETE http://localhost:8080/cache/user:123
+curl -X DELETE http://localhost:8001/cache/user:123
 # Response: {"message":"cache entry deleted"}
 ```
-
----
-
-## Running the Server
-
-Start the single-node cache server with configurable port, capacity, and eviction policy:
-
-```bash
-go run ./cmd/cache-server --port 8080 --capacity 100 --policy lru
-```
-
-Supported eviction policies for `--policy`:
-* `lru` (Least Recently Used)
-* `lfu` (Least Frequently Used)
-* `2q` (Two-Queue)
 
 ---
 
@@ -229,3 +236,9 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - Decoupled server architecture interacting via `Cache` interface
 - JSON request and response payloads with validation and error formatting
 - CLI flags (`--port`, `--capacity`, `--policy`) and graceful shutdown on termination signals
+
+### Phase 7 — Multiple Independent Cache Nodes
+- Node entity abstraction (`internal/node`) managing identity, config validation, and lifecycle
+- Multi-process execution on distinct ports (e.g. `:8001`, `:8002`, `:8003`)
+- Strict memory isolation guaranteeing zero accidental state sharing between nodes
+- Dedicated `/node` endpoint and `node_id` reporting on `/health`
