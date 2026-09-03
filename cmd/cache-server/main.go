@@ -8,64 +8,50 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"universal-distributed-cache/internal/cache"
-	"universal-distributed-cache/internal/server"
+	"universal-distributed-cache/internal/node"
 )
 
 func main() {
+	id := flag.String("id", "node-1", "Unique node identifier (default node-1)")
+	host := flag.String("host", "127.0.0.1", "Node host or bind address (default 127.0.0.1)")
 	port := flag.Int("port", 8080, "HTTP server port (default 8080)")
 	capacity := flag.Int("capacity", 100, "Maximum cache capacity (default 100)")
 	policyStr := flag.String("policy", "lru", "Eviction policy: lru, lfu, 2q (default lru)")
 	flag.Parse()
 
-	if *capacity <= 0 {
-		log.Fatalf("invalid capacity: %d (must be greater than 0)", *capacity)
+	cfg := node.Config{
+		ID:       *id,
+		Host:     *host,
+		Port:     *port,
+		Capacity: *capacity,
+		Policy:   *policyStr,
 	}
 
-	var policy cache.EvictionPolicy
-	switch strings.ToLower(strings.TrimSpace(*policyStr)) {
-	case "lru":
-		policy = cache.PolicyLRU
-	case "lfu":
-		policy = cache.PolicyLFU
-	case "2q":
-		policy = cache.Policy2Q
-	default:
-		log.Fatalf("invalid eviction policy: %q (supported: lru, lfu, 2q)", *policyStr)
-	}
-
-	c, err := cache.NewWithPolicy(*capacity, policy)
+	n, err := node.New(cfg)
 	if err != nil {
-		log.Fatalf("failed to initialize cache: %v", err)
+		log.Fatalf("node initialization error: %v", err)
 	}
-
-	cfg := server.DefaultConfig(*port)
-	srv := server.New(c, cfg)
 
 	// Channel to listen for OS termination signals
 	shutdownCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Starting Universal Distributed Cache Server on port %d [capacity: %d, policy: %s]...", *port, *capacity, policy)
-		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+		if err := n.Start(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 	}()
 
 	<-shutdownCh
-	log.Println("Received termination signal, shutting down cache server gracefully...")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := n.Shutdown(ctx); err != nil {
 		log.Fatalf("HTTP server shutdown error: %v", err)
 	}
 
-	fmt.Println("Cache server stopped successfully.")
+	fmt.Printf("Cache node %s stopped successfully.\n", n.ID())
 }
