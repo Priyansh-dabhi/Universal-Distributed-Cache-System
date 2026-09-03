@@ -1,14 +1,21 @@
 package cache
 
-// lruNode represents a doubly linked list node storing key and value for LRU.
+import "time"
+
+// lruNode represents a doubly linked list node storing key, value, and optional expiration for LRU.
 type lruNode struct {
-	key   string
-	value string
-	prev  *lruNode
-	next  *lruNode
+	key       string
+	value     string
+	expiresAt time.Time
+	prev      *lruNode
+	next      *lruNode
 }
 
-// lruCache implements the LRU (Least Recently Used) eviction policy.
+func (n *lruNode) isExpired(now time.Time) bool {
+	return !n.expiresAt.IsZero() && !now.Before(n.expiresAt)
+}
+
+// lruCache implements the LRU (Least Recently Used) eviction policy with lazy TTL expiration.
 type lruCache struct {
 	capacity int
 	items    map[string]*lruNode
@@ -58,9 +65,10 @@ func (l *lruCache) removeLRU() *lruNode {
 	return lru
 }
 
-func (l *lruCache) set(key string, value string) {
+func (l *lruCache) set(key string, value string, expiresAt time.Time) {
 	if n, ok := l.items[key]; ok {
 		n.value = value
+		n.expiresAt = expiresAt
 		l.moveToFront(n)
 		return
 	}
@@ -72,8 +80,9 @@ func (l *lruCache) set(key string, value string) {
 	}
 
 	newNode := &lruNode{
-		key:   key,
-		value: value,
+		key:       key,
+		value:     value,
+		expiresAt: expiresAt,
 	}
 	l.addToFront(newNode)
 	l.items[key] = newNode
@@ -84,6 +93,13 @@ func (l *lruCache) get(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+
+	if n.isExpired(time.Now()) {
+		l.removeNode(n)
+		delete(l.items, key)
+		return "", false
+	}
+
 	l.moveToFront(n)
 	return n.value, true
 }
@@ -93,8 +109,12 @@ func (l *lruCache) delete(key string) bool {
 	if !ok {
 		return false
 	}
+
 	l.removeNode(n)
 	delete(l.items, key)
+	if n.isExpired(time.Now()) {
+		return false
+	}
 	return true
 }
 

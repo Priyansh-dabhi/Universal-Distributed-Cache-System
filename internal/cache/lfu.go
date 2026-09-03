@@ -1,12 +1,19 @@
 package cache
 
-// lfuNode represents an item stored in the LFU cache with key, value, and frequency.
+import "time"
+
+// lfuNode represents an item stored in the LFU cache with key, value, frequency, and expiration.
 type lfuNode struct {
-	key   string
-	value string
-	freq  int
-	prev  *lfuNode
-	next  *lfuNode
+	key       string
+	value     string
+	freq      int
+	expiresAt time.Time
+	prev      *lfuNode
+	next      *lfuNode
+}
+
+func (n *lfuNode) isExpired(now time.Time) bool {
+	return !n.expiresAt.IsZero() && !now.Before(n.expiresAt)
 }
 
 // lfuList is a doubly linked list of lfuNodes sharing the same access frequency.
@@ -58,7 +65,7 @@ func (l *lfuList) isEmpty() bool {
 	return l.len == 0
 }
 
-// lfuCache implements the LFU (Least Frequently Used) eviction policy with LRU tie-breaking.
+// lfuCache implements the LFU (Least Frequently Used) eviction policy with LRU tie-breaking and lazy TTL expiration.
 type lfuCache struct {
 	capacity    int
 	items       map[string]*lfuNode
@@ -96,9 +103,10 @@ func (c *lfuCache) incrementFreq(n *lfuNode) {
 	newBucket.pushFront(n)
 }
 
-func (c *lfuCache) set(key string, value string) {
+func (c *lfuCache) set(key string, value string, expiresAt time.Time) {
 	if n, ok := c.items[key]; ok {
 		n.value = value
+		n.expiresAt = expiresAt
 		c.incrementFreq(n)
 		return
 	}
@@ -108,9 +116,10 @@ func (c *lfuCache) set(key string, value string) {
 	}
 
 	newNode := &lfuNode{
-		key:   key,
-		value: value,
-		freq:  1,
+		key:       key,
+		value:     value,
+		freq:      1,
+		expiresAt: expiresAt,
 	}
 	c.items[key] = newNode
 	b1, ok := c.freqBuckets[1]
@@ -136,22 +145,8 @@ func (c *lfuCache) evict() {
 	}
 }
 
-func (c *lfuCache) get(key string) (string, bool) {
-	n, ok := c.items[key]
-	if !ok {
-		return "", false
-	}
-	c.incrementFreq(n)
-	return n.value, true
-}
-
-func (c *lfuCache) delete(key string) bool {
-	n, ok := c.items[key]
-	if !ok {
-		return false
-	}
-
-	delete(c.items, key)
+func (c *lfuCache) removeNode(n *lfuNode) {
+	delete(c.items, n.key)
 	bucket := c.freqBuckets[n.freq]
 	if bucket != nil {
 		bucket.remove(n)
@@ -172,6 +167,34 @@ func (c *lfuCache) delete(key string) bool {
 			}
 		}
 	}
+}
+
+func (c *lfuCache) get(key string) (string, bool) {
+	n, ok := c.items[key]
+	if !ok {
+		return "", false
+	}
+
+	if n.isExpired(time.Now()) {
+		c.removeNode(n)
+		return "", false
+	}
+
+	c.incrementFreq(n)
+	return n.value, true
+}
+
+func (c *lfuCache) delete(key string) bool {
+	n, ok := c.items[key]
+	if !ok {
+		return false
+	}
+
+	expired := n.isExpired(time.Now())
+	c.removeNode(n)
+	if expired {
+		return false
+	}
 	return true
 }
 
@@ -181,7 +204,7 @@ func (c *lfuCache) size() int {
 
 func (c *lfuCache) getFrequency(key string) (int, bool) {
 	n, ok := c.items[key]
-	if !ok {
+	if !ok || n.isExpired(time.Now()) {
 		return 0, false
 	}
 	return n.freq, true

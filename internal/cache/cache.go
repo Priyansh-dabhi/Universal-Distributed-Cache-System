@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // EvictionPolicy defines the type of eviction algorithm used by the Cache.
@@ -30,7 +31,7 @@ var ErrUnsupportedPolicy = errors.New("unsupported eviction policy")
 // storage is the internal interface implemented by cache eviction strategies.
 type storage interface {
 	get(key string) (string, bool)
-	set(key string, value string)
+	set(key string, value string, expiresAt time.Time)
 	delete(key string) bool
 	size() int
 }
@@ -48,7 +49,7 @@ type twoQInspector interface {
 	amSize() int
 }
 
-// Cache represents an in-memory thread-safe key-value store supporting configurable eviction policies.
+// Cache represents an in-memory thread-safe key-value store supporting configurable eviction policies and TTL expiration.
 type Cache struct {
 	mu       sync.RWMutex
 	capacity int
@@ -132,16 +133,31 @@ func NewWithPolicy(capacity int, policy EvictionPolicy) (*Cache, error) {
 	}, nil
 }
 
-// Set stores a key-value pair in the cache according to the configured eviction policy.
+// Set stores a key-value pair in the cache without expiration.
+// If the key previously had a TTL, the expiration is removed.
 func (c *Cache) Set(key string, value string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.storage.set(key, value)
+	c.storage.set(key, value, time.Time{})
+}
+
+// SetWithTTL stores a key-value pair in the cache with a Time-To-Live (TTL).
+// A TTL <= 0 causes immediate expiration (deleting any existing entry and not storing a new one).
+func (c *Cache) SetWithTTL(key string, value string, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if ttl <= 0 {
+		c.storage.delete(key)
+		return
+	}
+
+	c.storage.set(key, value, time.Now().Add(ttl))
 }
 
 // Get retrieves the value associated with the given key and updates eviction recency/frequency/queue.
-// The second return value indicates whether the key was present in the cache.
+// If the entry has expired, it is lazily removed and ("", false) is returned.
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -150,7 +166,7 @@ func (c *Cache) Get(key string) (string, bool) {
 }
 
 // Delete removes the key and its value from the cache and eviction metadata.
-// It returns true if the key existed and was deleted, or false if it did not exist.
+// If the entry is already expired, it returns false while cleaning up any stale metadata.
 func (c *Cache) Delete(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -1,5 +1,7 @@
 package cache
 
+import "time"
+
 type queueType int
 
 const (
@@ -7,13 +9,18 @@ const (
 	queueAm queueType = 2
 )
 
-// twoQNode represents an entry in the 2Q cache.
+// twoQNode represents an entry in the 2Q cache with key, value, queue type, and expiration.
 type twoQNode struct {
-	key   string
-	value string
-	qType queueType
-	prev  *twoQNode
-	next  *twoQNode
+	key       string
+	value     string
+	qType     queueType
+	expiresAt time.Time
+	prev      *twoQNode
+	next      *twoQNode
+}
+
+func (n *twoQNode) isExpired(now time.Time) bool {
+	return !n.expiresAt.IsZero() && !now.Before(n.expiresAt)
 }
 
 // twoQList is a doubly linked list of twoQNodes with sentinel head and tail.
@@ -65,7 +72,7 @@ func (l *twoQList) popTail() *twoQNode {
 	return oldest
 }
 
-// twoQCache implements the 2Q (Two-Queue) eviction policy.
+// twoQCache implements the 2Q (Two-Queue) eviction policy with lazy TTL expiration.
 type twoQCache struct {
 	capacity int
 	a1Cap    int
@@ -86,9 +93,10 @@ func newTwoQCache(capacity, a1Cap, amCap int) *twoQCache {
 	}
 }
 
-func (c *twoQCache) set(key string, value string) {
+func (c *twoQCache) set(key string, value string, expiresAt time.Time) {
 	if node, ok := c.items[key]; ok {
 		node.value = value
+		node.expiresAt = expiresAt
 		if node.qType == queueA1 {
 			// Updating an existing A1 key counts as an access: promote to Am
 			c.promoteToAm(node)
@@ -115,9 +123,10 @@ func (c *twoQCache) set(key string, value string) {
 	}
 
 	newNode := &twoQNode{
-		key:   key,
-		value: value,
-		qType: queueA1,
+		key:       key,
+		value:     value,
+		qType:     queueA1,
+		expiresAt: expiresAt,
 	}
 	c.items[key] = newNode
 	c.a1.pushFront(newNode)
@@ -126,6 +135,11 @@ func (c *twoQCache) set(key string, value string) {
 func (c *twoQCache) get(key string) (string, bool) {
 	node, ok := c.items[key]
 	if !ok {
+		return "", false
+	}
+
+	if node.isExpired(time.Now()) {
+		c.removeNode(node)
 		return "", false
 	}
 
@@ -164,17 +178,25 @@ func (c *twoQCache) evictAm() {
 	}
 }
 
+func (c *twoQCache) removeNode(node *twoQNode) {
+	delete(c.items, node.key)
+	if node.qType == queueA1 {
+		c.a1.remove(node)
+	} else {
+		c.am.remove(node)
+	}
+}
+
 func (c *twoQCache) delete(key string) bool {
 	node, ok := c.items[key]
 	if !ok {
 		return false
 	}
 
-	delete(c.items, key)
-	if node.qType == queueA1 {
-		c.a1.remove(node)
-	} else {
-		c.am.remove(node)
+	expired := node.isExpired(time.Now())
+	c.removeNode(node)
+	if expired {
+		return false
 	}
 	return true
 }
@@ -185,12 +207,12 @@ func (c *twoQCache) size() int {
 
 func (c *twoQCache) isInA1(key string) bool {
 	node, ok := c.items[key]
-	return ok && node.qType == queueA1
+	return ok && node.qType == queueA1 && !node.isExpired(time.Now())
 }
 
 func (c *twoQCache) isInAm(key string) bool {
 	node, ok := c.items[key]
-	return ok && node.qType == queueAm
+	return ok && node.qType == queueAm && !node.isExpired(time.Now())
 }
 
 func (c *twoQCache) a1Size() int {

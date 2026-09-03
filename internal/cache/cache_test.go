@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func mustNew(t *testing.T, capacity int) *Cache {
@@ -1110,5 +1111,338 @@ func Test2QConcurrentAccess(t *testing.T) {
 
 	if c.Size() > capacity {
 		t.Fatalf("final 2Q size %d exceeded capacity %d", c.Size(), capacity)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5 TTL / Key Expiration Tests
+// -----------------------------------------------------------------------------
+
+// Test 1 — Set without TTL
+func TestTTLSetWithoutTTL(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.Set("A", "100")
+	val, ok := c.Get("A")
+	if !ok || val != "100" {
+		t.Fatalf("expected key 'A' without TTL to be available")
+	}
+}
+
+// Test 2 — Set with TTL
+func TestTTLSetWithTTL(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 200*time.Millisecond)
+	val, ok := c.Get("A")
+	if !ok || val != "100" {
+		t.Fatalf("expected key 'A' with TTL to be immediately available, got %q (ok=%v)", val, ok)
+	}
+}
+
+// Test 3 — Expiration
+func TestTTLExpiration(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 50*time.Millisecond)
+
+	time.Sleep(70 * time.Millisecond)
+
+	val, ok := c.Get("A")
+	if ok || val != "" {
+		t.Fatalf("expected key 'A' to expire, got %q (ok=%v)", val, ok)
+	}
+}
+
+// Test 4 — Expired entry is removed
+func TestTTLExpiredEntryIsRemoved(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 50*time.Millisecond)
+
+	time.Sleep(70 * time.Millisecond)
+
+	// GET encounters expired entry and lazily removes it
+	val, ok := c.Get("A")
+	if ok || val != "" {
+		t.Fatalf("expected expired entry to return miss")
+	}
+
+	if c.Size() != 0 {
+		t.Fatalf("expected cache size to be 0 after expired entry cleanup, got %d", c.Size())
+	}
+}
+
+// Test 5 — Update resets TTL
+func TestTTLUpdateResetsTTL(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 50*time.Millisecond)
+
+	time.Sleep(25 * time.Millisecond)
+
+	// Reset TTL to 200ms
+	c.SetWithTTL("A", "200", 200*time.Millisecond)
+
+	time.Sleep(50 * time.Millisecond)
+
+	val, ok := c.Get("A")
+	if !ok || val != "200" {
+		t.Fatalf("expected key 'A' to remain valid after TTL extension, got %q (ok=%v)", val, ok)
+	}
+}
+
+// Test 6 — Normal SET removes TTL
+func TestTTLNormalSetRemovesTTL(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 50*time.Millisecond)
+
+	// Overwrite with normal SET (removes TTL)
+	c.Set("A", "200")
+
+	time.Sleep(70 * time.Millisecond)
+
+	val, ok := c.Get("A")
+	if !ok || val != "200" {
+		t.Fatalf("expected key 'A' to remain valid indefinitely after normal SET, got %q (ok=%v)", val, ok)
+	}
+}
+
+// Test 7 — DELETE before expiration
+func TestTTLDeleteBeforeExpiration(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 1*time.Second)
+
+	deleted := c.Delete("A")
+	if !deleted {
+		t.Fatalf("expected Delete before expiration to return true")
+	}
+
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected 'A' to be deleted")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// Test 8 — DELETE after expiration
+func TestTTLDeleteAfterExpiration(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 40*time.Millisecond)
+
+	time.Sleep(60 * time.Millisecond)
+
+	// DELETE on expired entry should behave as if key does not exist
+	deleted := c.Delete("A")
+	if deleted {
+		t.Fatalf("expected Delete after expiration to return false")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// Test 9 — TTL = 0
+func TestTTLZeroImmediateExpiration(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", 0)
+
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected key with TTL=0 to be immediately expired")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0 after TTL=0, got %d", c.Size())
+	}
+
+	// Overwriting an existing key with TTL=0 should remove it
+	c.Set("B", "200")
+	c.SetWithTTL("B", "300", 0)
+
+	if _, ok := c.Get("B"); ok {
+		t.Fatalf("expected key overwritten with TTL=0 to be removed")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0 after overwriting with TTL=0, got %d", c.Size())
+	}
+}
+
+// Test 10 — Negative TTL
+func TestTTLNegativeImmediateExpiration(t *testing.T) {
+	c := mustNew(t, 10)
+
+	c.SetWithTTL("A", "100", -5*time.Second)
+
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected key with negative TTL to be immediately expired")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0 after negative TTL, got %d", c.Size())
+	}
+}
+
+// Test 11 — TTL with LRU
+func TestTTLWithLRU(t *testing.T) {
+	c := mustNew(t, 3)
+
+	c.SetWithTTL("A", "1", 50*time.Millisecond)
+	c.Set("B", "2")
+	c.Set("C", "3")
+
+	time.Sleep(70 * time.Millisecond)
+
+	// 'A' has expired. Now access B to make it MRU.
+	c.Get("B")
+
+	// Insert D into full cache. Expired A should not prevent normal eviction.
+	c.Set("D", "4")
+
+	// 'A' must return not found
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected expired key 'A' to return false")
+	}
+
+	// B and D must be present
+	if val, ok := c.Get("B"); !ok || val != "2" {
+		t.Fatalf("expected key 'B' to be present")
+	}
+	if val, ok := c.Get("D"); !ok || val != "4" {
+		t.Fatalf("expected key 'D' to be present")
+	}
+}
+
+// Test 12 — TTL with LFU
+func TestTTLWithLFU(t *testing.T) {
+	c := mustNewLFU(t, 3)
+
+	c.SetWithTTL("A", "1", 50*time.Millisecond)
+	c.Get("A") // freq 2
+
+	time.Sleep(70 * time.Millisecond)
+
+	// Access expired key: should return false and not increment frequency
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected expired key 'A' to return false")
+	}
+
+	if freq, ok := c.GetFrequency("A"); ok || freq != 0 {
+		t.Fatalf("expected frequency of expired key to return false")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// Test 13 — TTL with 2Q
+func TestTTLWith2Q(t *testing.T) {
+	c := mustNew2QWithCapacities(t, 4, 2, 2)
+
+	// Set A in A1 with TTL
+	c.SetWithTTL("A", "1", 50*time.Millisecond)
+
+	// Set B in A1 with TTL and promote to Am
+	c.SetWithTTL("B", "2", 50*time.Millisecond)
+	c.Get("B") // Promotes B to Am
+
+	if !c.IsInA1("A") {
+		t.Fatalf("expected A in A1 initially")
+	}
+	if !c.IsInAm("B") {
+		t.Fatalf("expected B in Am initially")
+	}
+
+	time.Sleep(70 * time.Millisecond)
+
+	// Both A and B expired
+	if _, ok := c.Get("A"); ok {
+		t.Fatalf("expected expired A in A1 to return false")
+	}
+	if _, ok := c.Get("B"); ok {
+		t.Fatalf("expected expired B in Am to return false")
+	}
+
+	if c.IsInA1("A") {
+		t.Fatalf("expected expired A to be removed from A1")
+	}
+	if c.IsInAm("B") {
+		t.Fatalf("expected expired B to be removed from Am")
+	}
+	if c.Size() != 0 {
+		t.Fatalf("expected size 0, got %d", c.Size())
+	}
+}
+
+// Test 14 — Concurrent TTL operations
+func TestTTLConcurrentAccess(t *testing.T) {
+	capacity := 20
+	c := mustNew(t, capacity)
+	var wg sync.WaitGroup
+
+	numGoroutines := 50
+	operationsPerGoroutine := 150
+
+	// Writers setting with and without TTL
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%30)
+				val := fmt.Sprintf("val-%d-%d", workerID, j)
+				if j%2 == 0 {
+					c.SetWithTTL(key, val, 20*time.Millisecond)
+				} else {
+					c.Set(key, val)
+				}
+			}
+		}(i)
+	}
+
+	// Readers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%30)
+				_, _ = c.Get(key)
+			}
+		}()
+	}
+
+	// Deleters
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				key := fmt.Sprintf("key-%d", j%30)
+				_ = c.Delete(key)
+			}
+		}()
+	}
+
+	// Size checkers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < operationsPerGoroutine; j++ {
+				s := c.Size()
+				if s > capacity {
+					t.Errorf("size %d exceeded capacity %d during concurrent TTL access", s, capacity)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if c.Size() > capacity {
+		t.Fatalf("final size %d exceeded capacity %d", c.Size(), capacity)
 	}
 }

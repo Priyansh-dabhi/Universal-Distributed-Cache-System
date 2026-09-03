@@ -29,8 +29,33 @@ Phase 1 — Basic In-Memory Cache    ✓
 Phase 2 — LRU                     ✓
 Phase 3 — LFU                     ✓
 Phase 4 — 2Q                      ✓
-Phase 5 — TTL                     Planned
+Phase 5 — TTL                     ✓
+Phase 6 — HTTP API                Planned
 ```
+
+---
+
+## TTL / Key Expiration Overview
+
+TTL (Time-To-Live) controls how long an entry remains valid. Eviction policies (LRU, LFU, 2Q) control which entry is removed when the cache reaches its capacity. These are completely independent mechanisms.
+
+```text
+TTL controls how long an entry remains valid.
+
+Eviction policies control which entry is removed when
+the cache reaches its capacity.
+
+These are independent mechanisms.
+```
+
+### Expiration Semantics
+
+* **`Set(key, value)`**: Stores a key with no expiration (`expiresAt` is zero). If the key previously had a TTL, the expiration is removed, converting it into a persistent cache entry.
+* **`SetWithTTL(key, value, ttl)`**: Stores a key with an absolute expiration calculated as `time.Now().Add(ttl)`.
+* **Updating TTL**: Calling `SetWithTTL` on an existing key updates its value and resets its expiration to `now + new_ttl`.
+* **Lazy Expiration**: Expired entries are detected and cleaned up lazily when an operation encounters them (`GET`, `DELETE`). This avoids background cleanup goroutines and extra concurrency overhead while guaranteeing expired entries are never returned.
+* **Edge-case Semantics (`TTL <= 0`)**:
+  - `TTL = 0` or negative `TTL < 0`: Treated as immediately expired. Any existing entry with that key is removed immediately, and no entry is stored in cache.
 
 ---
 
@@ -58,6 +83,10 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 
 ## Major Data Structures
 
+### Cache Coordinator & TTL
+- **`expiresAt time.Time`**: Attached to each cache node across all eviction policies.
+- **Lazy Eviction on Access**: During `Get`, if `!expiresAt.IsZero() && now >= expiresAt`, the entry is unlinked and deleted in $O(1)$ time.
+
 ### LRU Architecture
 - **HashMap (`map[string]*lruNode`)**: $O(1)$ key lookup.
 - **Doubly Linked List**: Maintains recency order between sentinel `head` (MRU) and `tail` (LRU).
@@ -80,13 +109,15 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 
 | Operation | Expected Complexity | Description |
 | :--- | :---: | :--- |
-| **GET** | $O(1)$ average | Map lookup + node recency/frequency/queue promotion update |
+| **GET** | $O(1)$ average | Map lookup + $O(1)$ expiration check + recency/frequency/promotion update |
 | **SET** | $O(1)$ average | Map lookup/insert + node insertion + optional eviction |
+| **SET with TTL** | $O(1)$ average | Same as SET with timestamp calculation |
 | **DELETE** | $O(1)$ average | Map removal + unlinking from linked list / frequency bucket / 2Q queue |
+| **Expiration Check** | $O(1)$ | Timestamp comparison (`now >= expiresAt`) |
 | **Promotion A1 → Am** | $O(1)$ | Unlink from A1 and prepend to Am head |
 | **A1 eviction** | $O(1)$ | Unlink tail of A1 FIFO queue |
 | **Am eviction** | $O(1)$ | Unlink tail of Am LRU queue |
-| **Size** | $O(1)$ | Querying map length |
+| **Size** | $O(1)$ | Querying map length (expired entries cleaned up on access) |
 
 ---
 
@@ -112,4 +143,9 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - Dual-queue architecture separating recent admissions (A1 FIFO) from frequent entries (Am LRU)
 - Admission and promotion mechanics preventing single-access scan pollution
 - Configurable capacity partitioning (default 25% A1 / 75% Am)
-- Full test suite covering queue separation, promotions, LRU behavior, and concurrency
+
+### Phase 5 — TTL / Key Expiration
+- Optional `time.Duration` expiration on entries via `SetWithTTL`
+- Reversion to persistent entries on normal `Set`
+- Lazy expiration upon access preventing background cleanup goroutine overhead
+- Seamless compatibility with LRU, LFU, and 2Q eviction mechanics
