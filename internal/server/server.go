@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"universal-distributed-cache/internal/cache"
+	"universal-distributed-cache/internal/metrics"
 )
 
 // Cache defines the interface required by the HTTP server from the underlying cache engine.
@@ -19,6 +20,7 @@ type Cache interface {
 	Size() int
 	Capacity() int
 	Policy() cache.EvictionPolicy
+	Metrics() *metrics.CacheMetrics
 }
 
 // Config contains configuration options for the HTTP server and node identity.
@@ -45,17 +47,19 @@ func DefaultConfig(port int) Config {
 
 // Server wraps an HTTP server and delegates cache operations to the Cache interface.
 type Server struct {
-	cache      Cache
-	cfg        Config
-	httpServer *http.Server
-	handler    http.Handler
+	cache       Cache
+	cfg         Config
+	httpMetrics *metrics.HTTPMetrics
+	httpServer  *http.Server
+	handler     http.Handler
 }
 
 // New creates and initializes a new HTTP Server.
 func New(c Cache, cfg Config) *Server {
 	s := &Server{
-		cache: c,
-		cfg:   cfg,
+		cache:       c,
+		cfg:         cfg,
+		httpMetrics: metrics.NewHTTPMetrics(),
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
@@ -98,4 +102,9 @@ func (s *Server) Handler() http.Handler {
 // Config returns the server's configuration.
 func (s *Server) Config() Config {
 	return s.cfg
+}
+
+// Metrics returns the server's HTTP telemetry metrics.
+func (s *Server) Metrics() *metrics.HTTPMetrics {
+	return s.httpMetrics
 }
