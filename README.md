@@ -31,7 +31,7 @@ Phase 7 — Multiple Cache Nodes            ✓
 Phase 8 — Router                          ✓
 Phase 9 — Consistent Hashing              ✓
 Phase 10 — Concurrency & Metrics          ✓
-Phase 11 — Benchmarking & Performance     Planned
+Phase 11 — Benchmarking & Performance     ✓
 ```
 
 ---
@@ -334,3 +334,49 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - New `/metrics` JSON endpoints for both cache server nodes and the distributed router
 - Context propagation (`http.NewRequestWithContext`) canceling outbound requests upon client disconnect
 - Multi-worker concurrent stress tests and Go benchmark suite in preparation for Phase 11
+
+### Phase 11 — Benchmarking & Performance Evaluation
+- Comprehensive empirical evaluation of **LRU vs LFU vs 2Q** across operation types, capacities (100, 1,000, 10,000), and synthetic workloads
+- 5 deterministic synthetic workloads: Uniform Random, Zipfian / Hot-Key, Sequential Access, Scan / Pollution, and Repeated Hot Set
+- Multi-threaded parallel benchmarks (`b.RunParallel`) measuring lock contention and concurrent throughput across 12 worker goroutines
+- Empirical topology change experiments: consistent hashing remapped only **13.37%** of keys on node addition vs **75.07%** under modulo hashing
+- Full empirical report, layered latency breakdown, charts, and architectural analysis documented in [`docs/benchmark-results.md`](docs/benchmark-results.md)
+
+---
+
+## Benchmarking & Performance Evaluation
+
+The system includes a reproducible benchmarking suite built on Go's standard `testing.B` framework.
+
+### 1. Running Benchmarks
+
+```bash
+# Run operation microbenchmarks with memory allocations (Layer 1)
+go test -bench="Benchmark(Get|Set|Delete|TTL|Parallel)" -benchmem ./internal/cache
+
+# Run the complete empirical workload evaluation table (LRU vs LFU vs 2Q)
+$env:RUN_WORKLOAD_REPORT="1"; go test -v -run="TestWorkloadEvaluationReport" ./internal/cache
+
+# Run consistent hashing topology change experiments (3 -> 4 nodes, node removal)
+go test -v -run="TestConsistentHashNode" ./internal/router
+
+# Run consistent hash ring lookup benchmark (Layer 2)
+go test -bench="BenchmarkConsistentHashRingLookup" -benchmem ./internal/router
+
+# Run direct HTTP node benchmarks (Layer 3)
+go test -bench="BenchmarkHTTPServer" -benchmem ./internal/server
+
+# Run distributed router proxy benchmarks (Layer 4)
+go test -bench="BenchmarkRouterProxy" -benchmem ./internal/router
+```
+
+### 2. Key Empirical Findings
+
+- **Best Raw Read Latency**: **2Q** achieved the lowest GET latency (**22.10 – 27.60 ns/op**) with zero memory allocations.
+- **Best Hit Rate under Hot-Key / Skewed Traffic**: **LFU** achieved the highest hit rate (**77.38%** at capacity 100 and **90.66%** at capacity 1,000) under Zipfian distributions.
+- **Best Concurrent Read Scalability**: Under 12 parallel reader goroutines, **2Q** achieved **73.19 ns/op** (1.45x faster than LRU's 106.2 ns/op).
+- **Cluster Resiliency**: Adding a 4th node remapped only **13.37%** of keys under Consistent Hashing compared to **75.07%** under Modulo Hashing.
+- **Layered Overhead**: Core cache engine lookups require **~25 ns**, while network and HTTP serialization account for **>99.9%** of total request latency (~90 µs direct node, ~207 µs router proxy).
+
+For full benchmark tables, visual comparison charts, and interview-level analyses, see [docs/benchmark-results.md](docs/benchmark-results.md).
+
