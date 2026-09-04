@@ -602,6 +602,65 @@ func BenchmarkRouterProxy(b *testing.B) {
 	}
 }
 
+func BenchmarkRouterProxyPut(b *testing.B) {
+	n, _ := node.New(node.Config{ID: "node-1", Host: "127.0.0.1", Port: 18001, Capacity: 1000, Policy: "lru"})
+	backendServer := httptest.NewServer(n.Server().Handler())
+	defer backendServer.Close()
+
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: backendServer.URL})
+	r := New(ring, DefaultConfig(9000))
+	routerServer := httptest.NewServer(r.Handler())
+	defer routerServer.Close()
+
+	client := routerServer.Client()
+	payload := []byte(`{"value":"updated-val"}`)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("proxy-put-%d", i%500)
+		req, _ := http.NewRequest(http.MethodPut, routerServer.URL+"/cache/"+key, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+}
+
+func BenchmarkRouterProxyDelete(b *testing.B) {
+	n, _ := node.New(node.Config{ID: "node-1", Host: "127.0.0.1", Port: 18001, Capacity: 1000, Policy: "lru"})
+	backendServer := httptest.NewServer(n.Server().Handler())
+	defer backendServer.Close()
+
+	ring := NewHashRing(DefaultReplicas)
+	_ = ring.AddNode(Node{ID: "node-1", Address: backendServer.URL})
+	r := New(ring, DefaultConfig(9000))
+	routerServer := httptest.NewServer(r.Handler())
+	defer routerServer.Close()
+
+	client := routerServer.Client()
+
+	// Pre-insert keys
+	for i := 0; i < 500; i++ {
+		key := fmt.Sprintf("proxy-del-%d", i)
+		req, _ := http.NewRequest(http.MethodPut, routerServer.URL+"/cache/"+key, bytes.NewBufferString(`{"value":"val"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, _ := client.Do(req)
+		_ = resp.Body.Close()
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := fmt.Sprintf("proxy-del-%d", i%500)
+		req, _ := http.NewRequest(http.MethodDelete, routerServer.URL+"/cache/"+key, nil)
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}
+}
+
 // TestClusterMetricsIntegration verifies end-to-end telemetry across a 3-node cluster and router.
 func TestClusterMetricsIntegration(t *testing.T) {
 	n1, _ := node.New(node.Config{ID: "node-1", Host: "127.0.0.1", Port: 18001, Capacity: 50, Policy: "lru"})
