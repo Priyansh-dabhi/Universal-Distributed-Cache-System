@@ -1,6 +1,6 @@
 # Architecture
 
-## Current Architecture (Phase 10 — Concurrency, Metrics & Observability)
+## Current Architecture (Phase 11 — Benchmarking & Performance Evaluation)
 
 The system implements a distributed cache cluster where client requests are routed through a central HTTP reverse proxy router backed by a **Consistent Hash Ring** with virtual nodes, hardened for high concurrent throughput, and instrumented with lock-free atomic telemetry:
 
@@ -190,3 +190,44 @@ key ──► hash(key) ──► ring position ──► clockwise binary searc
 - **HashRing**: Hash calculation, virtual node replica management, collision resolution, key-to-node clockwise mapping, thread safety.
 - **Cache Server**: Local HTTP API handlers (`PUT`, `GET`, `DELETE`, `/health`, `/node`, `/cache`, `/metrics`), status recording.
 - **Cache Engine**: Eviction policies (LRU, LFU, 2Q), lazy TTL expiration, exclusive concurrency safety, cache telemetry.
+
+---
+
+## 6. Benchmarking & Performance Evaluation Framework
+
+Phase 11 introduces a multi-tiered benchmarking architecture designed to evaluate the cache engine, hashing ring, and transport stack with rigorous scientific controls:
+
+### Layered Benchmark Isolation
+To determine exactly where latency originates, the benchmarking system isolates components into 4 distinct layers:
+
+```text
+Layer 1: Raw Cache Engine (In-Memory Microbenchmarks & Synthetic Workloads)
+           ├── Microbenchmarks: GET (existing/missing), SET (new/existing), DELETE
+           ├── TTL benchmarks: SetWithTTL, GetBeforeExpiry, GetAfterExpiry
+           └── Synthetic Workloads: Uniform, Zipfian, Sequential, Scan/Pollution, Hot Set
+                               │
+Layer 2: Hash Ring Routing Decision (HashRing.GetNode)
+           └── Binary search latency across 3–50 nodes and 50–300 virtual replicas
+                               │
+Layer 3: Cache Node HTTP Server (Direct Node Endpoints)
+           └── Single-hop HTTP serialization, context creation, and handler latency
+                               │
+Layer 4: Distributed Router HTTP Proxy (End-to-End Client Routing)
+           └── Router HTTP proxying, HashRing selection, and backend TCP communication
+```
+
+### Deterministic Workload Generators
+All synthetic workloads enforce determinism (`seed = 42`) to guarantee cross-policy fairness:
+1. **Uniform Random**: Flat key distribution testing non-local memory patterns.
+2. **Zipfian / Hot-Key**: Power-law distribution ($s=1.25, v=1.0$) testing frequency exploitation.
+3. **Sequential Scan**: Streaming sequential accesses testing zero-locality cache behavior.
+4. **Scan / Pollution**: Hot-set establishment followed by a 5,000-key one-time scan to test 2Q pollution resistance.
+5. **Repeated Hot Set**: Bounded 50-key working set tested against under-sized ($C=20$) and fitting ($C=100$) caches.
+
+### Empirical Topology Analysis
+Topological scaling tests quantify data migration:
+- **Consistent Hashing**: $\approx \frac{K}{N+1}$ keys moved on node addition (**13.37%** in empirical tests), with $0\%$ disruption to unaffected nodes.
+- **Modulo Hashing**: $\approx \frac{N}{N+1}$ keys moved on node addition (**75.07%** in empirical tests), causing widespread cache stampedes.
+
+For detailed numbers, graphs, and hardware environment details, refer to [`docs/benchmark-results.md`](benchmark-results.md).
+
