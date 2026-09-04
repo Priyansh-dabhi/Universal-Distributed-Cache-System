@@ -50,6 +50,16 @@ func (m *CacheMetrics) IncExpired() {
 	m.expired.Add(1)
 }
 
+// Reset resets all counters in CacheMetrics to zero.
+func (m *CacheMetrics) Reset() {
+	m.hits.Store(0)
+	m.misses.Store(0)
+	m.sets.Store(0)
+	m.deletes.Store(0)
+	m.evictions.Store(0)
+	m.expired.Store(0)
+}
+
 // Hits returns the current number of cache hits.
 func (m *CacheMetrics) Hits() uint64 {
 	return m.hits.Load()
@@ -142,6 +152,15 @@ func (m *HTTPMetrics) RecordRequest(statusCode int, duration time.Duration) {
 	} else if statusCode >= 500 {
 		m.errors5xx.Add(1)
 	}
+}
+
+// Reset resets all counters in HTTPMetrics to zero.
+func (m *HTTPMetrics) Reset() {
+	m.requests.Store(0)
+	m.successes.Store(0)
+	m.errors4xx.Store(0)
+	m.errors5xx.Store(0)
+	m.totalLatencyNs.Store(0)
 }
 
 // Requests returns total HTTP requests received.
