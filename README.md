@@ -378,5 +378,6 @@ go test -bench="BenchmarkRouterProxy" -benchmem ./internal/router
 - **Cluster Resiliency**: Adding a 4th node remapped only **13.37%** of keys under Consistent Hashing compared to **75.07%** under Modulo Hashing.
 - **Layered Overhead**: Core cache engine lookups require **~25 ns**, while network and HTTP serialization account for **>99.9%** of total request latency (~90 µs direct node, ~207 µs router proxy).
 
-For full benchmark tables, visual comparison charts, and interview-level analyses, see [docs/benchmark-results.md](docs/benchmark-results.md).
+For full benchmark tables, visual comparison charts, and interview-level analyses, see [docs/benchmark-results.md](docs/benchmark-results.md).  
+For a beginner-to-advanced explanation of all architectural concepts and how they are implemented in our app, see [docs/architecture-concepts.md](docs/architecture-concepts.md).
 
