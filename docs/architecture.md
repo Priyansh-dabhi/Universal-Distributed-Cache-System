@@ -2,6 +2,9 @@
 
 ## Current Architecture (Phase 11 — Benchmarking & Performance Evaluation)
 
+> [!TIP]
+> For a structured, beginner-to-advanced explanation of all architectural concepts (Router, Hash Ring, Eviction Policies, TTL, Telemetry, etc.) and how each is implemented and used in this project, see the [Architecture Concepts & System Guide](architecture-concepts.md).
+
 The system implements a distributed cache cluster where client requests are routed through a central HTTP reverse proxy router backed by a **Consistent Hash Ring** with virtual nodes, hardened for high concurrent throughput, and instrumented with lock-free atomic telemetry:
 
 ```text
