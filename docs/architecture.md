@@ -1,6 +1,6 @@
 # Architecture
 
-## Current Architecture (Phase 11 — Benchmarking & Performance Evaluation)
+## Architecture Overview
 
 > [!TIP]
 > For a structured, beginner-to-advanced explanation of all architectural concepts (Router, Hash Ring, Eviction Policies, TTL, Telemetry, etc.) and how each is implemented and used in this project, see the [Architecture Concepts & System Guide](architecture-concepts.md).
@@ -198,7 +198,7 @@ key ──► hash(key) ──► ring position ──► clockwise binary searc
 
 ## 6. Benchmarking & Performance Evaluation Framework
 
-Phase 11 introduces a multi-tiered benchmarking architecture designed to evaluate the cache engine, hashing ring, and transport stack with rigorous scientific controls:
+The system features a multi-tiered benchmarking architecture designed to evaluate the cache engine, hashing ring, and transport stack with rigorous scientific controls:
 
 ### Layered Benchmark Isolation
 To determine exactly where latency originates, the benchmarking system isolates components into 4 distinct layers:

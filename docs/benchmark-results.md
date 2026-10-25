@@ -1,6 +1,6 @@
 # Benchmark Results & Performance Evaluation Report
 
-This document details the empirical benchmarking and performance evaluation for Phase 11 of the Universal Distributed Cache System.
+This document details the empirical benchmarking and performance evaluation of the Universal Distributed Cache System.
 
 All benchmarks were executed using Go's built-in benchmarking framework (`testing.B`) and deterministic synthetic workloads. **All metrics, latencies, allocation counts, and redistribution percentages reported herein are empirical measurements taken directly from actual test runs.**
 
@@ -45,9 +45,9 @@ All workloads use deterministic pseudo-random seeds (`seed = 42`) and standard G
    - Monotonically increasing linear scan (`seq-0`, `seq-1`, `seq-2` ...).
    - Tests streaming behavior and verifies cache eviction behavior under zero-reuse traffic.
 4. **Workload 4 — Scan / Pollution Workload**:
-   - **Phase A**: 50 hot keys accessed repeatedly (10 times each) to establish them in cache.
-   - **Phase B**: One-time sequential scan of 5,000 cold keys.
-   - **Phase C**: The original 50 hot keys accessed again to measure retention and survival.
+   - **Stage A**: 50 hot keys accessed repeatedly (10 times each) to establish them in cache.
+   - **Stage B**: One-time sequential scan of 5,000 cold keys.
+   - **Stage C**: The original 50 hot keys accessed again to measure retention and survival.
    - Designed specifically to test resistance against cache pollution (the core motivation for 2Q).
 5. **Workload 5 — Repeated Hot Set**:
    - Working set strictly bounded to 50 keys, accessed repeatedly in random order.
@@ -58,9 +58,9 @@ All workloads use deterministic pseudo-random seeds (`seed = 42`) and standard G
 
 ### 2.3 Warm-Up and Measurement
 Each workload experiment separates warm-up from measurement:
-- **Warm-Up Phase**: 5,000 operations executed to pre-populate entries and warm up recency/frequency queues.
+- **Warm-Up Stage**: 5,000 operations executed to pre-populate entries and warm up recency/frequency queues.
 - **Metric Reset**: Counters in `metrics.CacheMetrics` are atomically reset to zero (`c.Metrics().Reset()`).
-- **Measurement Phase**: 50,000 operations executed under high-precision timing while tracking hits, misses, evictions, latency, and throughput.
+- **Measurement Stage**: 50,000 operations executed under high-precision timing while tracking hits, misses, evictions, latency, and throughput.
 
 ---
 

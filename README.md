@@ -12,27 +12,69 @@ A lightweight distributed in-memory caching system built in Go.
 * Concurrent request handling
 * Cache metrics and benchmarking
 
-## Planned Eviction Policies
+## Features & Capabilities
 
-* LRU (Implemented)
-* LFU (Implemented)
-* 2Q (Implemented)
+* **High-Performance In-Memory Storage**: Fast $O(1)$ reads and writes backed by thread-safe Go structures.
+* **Pluggable Eviction Policies**: Full implementations of **LRU** (Least Recently Used), **LFU** (Least Frequently Used), and **2Q** (Two-Queue Scan-Resistant).
+* **TTL-Based Lazy Expiration**: Expire stale keys upon access with zero background timer goroutine overhead.
+* **Distributed Routing & Consistent Hashing**: Reverse proxy router with a 360° consistent hash ring and 100 virtual node tokens per physical server.
+* **Concurrency Hardening & Telemetry**: Lock-free atomic metrics counters tracking hits, misses, hit rate, and latency.
+* **Interactive Web Studio**: Standalone in-browser visualizer and cluster control dashboard built with React 19 and TypeScript.
+* **Scientific Benchmarking Suite**: Layered microbenchmarks and deterministic synthetic workloads (Zipfian, Uniform, Table Scan).
 
-## Status
+---
+
+## Interactive Web UI & Distributed Studio
+
+A rich, dark-mode visualization and educational studio built with **React 19, TypeScript, Framer Motion, Recharts, and Tailwind CSS v4**.
 
 ```text
-Phase 1 — Basic In-Memory Cache            ✓
-Phase 2 — LRU                             ✓
-Phase 3 — LFU                             ✓
-Phase 4 — 2Q                              ✓
-Phase 5 — TTL                             ✓
-Phase 6 — HTTP API                        ✓
-Phase 7 — Multiple Cache Nodes            ✓
-Phase 8 — Router                          ✓
-Phase 9 — Consistent Hashing              ✓
-Phase 10 — Concurrency & Metrics          ✓
-Phase 11 — Benchmarking & Performance     ✓
++-----------------------------------------------------------------------------------------+
+|  ⚡ Distributed Cache Studio                    [● Live Cluster]  [○ Web Simulator]     |
++-----------------------------------------------------------------------------------------+
+|  [◎ Hash Ring]  [⌨ CRUD Studio]  [▤ Eviction Lab]  [📈 Telemetry & Metrics]  [📖 Learn]  |
++-----------------------------------------------------------------------------------------+
+|                                                                                         |
+|   360° Circular SVG Ring Visualizer           Multi-Level Eviction Pipelines            |
+|   • Virtual token scattering (100 replicas)   • LRU Doubly Linked List with Sentinels   |
+|   • Animated clockwise routing sweep          • LFU Frequency Buckets + LRU Tie-Break   |
+|   • Consistent vs Modulo redistribution test  • 2Q Probation (A1) & Main (Am) Promotion |
+|   • Chaos controls (Add/Remove live nodes)    • Scan Attack pollution resistance demo   |
+|                                                                                         |
+|   CRUD Studio & Cluster Inspector             Telemetry & Traffic Generator             |
+|   • GET / PUT / DELETE with TTL presets       • Real-time animated circular Hit-Rate    |
+|   • End-to-end hop trace & JSON response      • Recharts throughput & latency series    |
+|   • Node memory capacity progress bars        • Synthetic Workloads (Zipfian, Uniform)  |
+|   • Slide-over resident key inspector drawer  • Live traffic stress-testing suite       |
++-----------------------------------------------------------------------------------------+
 ```
+
+### Dual-Mode Architecture
+
+The Web Studio runs in two interchangeable modes via the top navigation toggle:
+1. **Live Cluster Mode**: Direct HTTP REST communication with the Go cluster (`router:9000` and `nodes:8001–800N`). Inspects real memory, routes real keys, and monitors real Go server atomics.
+2. **Web Simulator Mode**: Zero-install standalone mode. Emulates the complete distributed system entirely in the browser using high-performance TypeScript implementations of FNV-1a, ConsistentHashRing, LRU, LFU, 2Q, and telemetry counters. Ready for instant sharing on GitHub Pages or Vercel.
+
+### Quickstart (Web UI)
+
+```bash
+# 1. Navigate to UI directory
+cd ui
+
+# 2. Install dependencies
+npm install
+
+# 3. Start local development server
+npm run dev
+# -> Opens http://localhost:3000 with proxy to Go router at :9000
+
+# 4. Lint and verify types
+npm run lint         # Runs Oxlint & ESLint with 0 warnings
+npm run typecheck    # Runs TypeScript compiler (tsc -b)
+npm run build        # Production bundle with Rollup chunk splitting
+```
+
+For a comprehensive, step-by-step walkthrough explaining how to test each tab, see the [Interactive Web Studio Testing Guide](docs/ui-testing-guide.md).
 
 ---
 
@@ -271,54 +313,54 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 
 ---
 
-## Phase Summary
+## Architectural Components & Deep Dive
 
-### Phase 1 — Basic In-Memory Cache
+### 1. In-Memory Cache Core
 - Core key-value store (`SET`, `GET`, `DELETE`, `Size`)
 - Thread safety via internal `sync.RWMutex`
 - Comprehensive unit tests
 
-### Phase 2 — LRU Eviction
+### 2. LRU Eviction Engine
 - Configurable maximum capacity and error validation
-- Doubly linked list for $O(1)$ recency promotion and eviction
+- Doubly linked list with sentinel nodes for $O(1)$ recency promotion and eviction
 - Concurrency protection across readers and writers
 
-### Phase 3 — LFU Eviction
+### 3. LFU Eviction Engine
 - Frequency tracking (initial frequency 1, increment on GET and SET updates)
 - Frequency buckets with $O(1)$ promotions
 - Deterministic LRU tie-breaking within identical frequency tiers
 - Dynamic `minFreq` tracking for $O(1)$ evictions
 
-### Phase 4 — 2Q Eviction
+### 4. 2Q Eviction Engine
 - Dual-queue architecture separating recent admissions (A1 FIFO) from frequent entries (Am LRU)
 - Admission and promotion mechanics preventing single-access scan pollution
 - Configurable capacity partitioning (default 25% A1 / 75% Am)
 
-### Phase 5 — TTL / Key Expiration
+### 5. TTL / Key Expiration
 - Optional `time.Duration` expiration on entries via `SetWithTTL`
 - Reversion to persistent entries on normal `Set`
 - Lazy expiration upon access preventing background cleanup goroutine overhead
 - Seamless compatibility with LRU, LFU, and 2Q eviction mechanics
 
-### Phase 6 — HTTP API
+### 6. HTTP API & REST Transport
 - RESTful HTTP transport layer using Go standard library `net/http`
 - Decoupled server architecture interacting via `Cache` interface
 - JSON request and response payloads with validation and error formatting
 - CLI flags (`--port`, `--capacity`, `--policy`) and graceful shutdown on termination signals
 
-### Phase 7 — Multiple Independent Cache Nodes
+### 7. Multi-Node Cluster Isolation
 - Node entity abstraction (`internal/node`) managing identity, config validation, and lifecycle
 - Multi-process execution on distinct ports (e.g. `:8001`, `:8002`, `:8003`)
 - Strict memory isolation guaranteeing zero accidental state sharing between nodes
 - Dedicated `/node` endpoint and `node_id` reporting on `/health`
 
-### Phase 8 — Distributed Router with Hash-Based Routing
+### 8. Distributed Reverse-Proxy Router
 - Central HTTP reverse proxy router dispatching client requests
-- Deterministic FNV-1a hashing with modulo node index selection: $\text{hash}(\text{key}) \pmod N$
+- Deterministic FNV-1a hashing with modulo and consistent hashing strategies
 - Node registry with strict URL and ID validation
 - End-to-end transparent payload proxying with 502 bad gateway isolation on unreachable nodes
 
-### Phase 9 — Consistent Hashing
+### 9. Consistent Hashing Ring
 - Dedicated, thread-safe `HashRing` component replacing modulo hashing
 - Virtual nodes (default 100 replicas) distributing load uniformly across the 32-bit hash space
 - Clockwise key routing via binary search (`sort.Search`) in $O(\log R)$ time (~121 ns/op)
@@ -326,16 +368,16 @@ New entries initially enter **A1**. If an entry in A1 is accessed again (via `GE
 - Deterministic virtual node naming with linear probing collision resolution ensuring input-order independence
 - Router HTTP handlers decoupled from hashing implementation details
 
-### Phase 10 — Concurrency, Metrics & Observability
+### 10. Concurrency, Metrics & Observability
 - Concurrency hardening across all cache engines with exclusive locking on state-mutating `Get` operations
 - Lock-free atomic metrics package (`internal/metrics`) tracking hits, misses, hit rate, sets, deletes, evictions, expired entries
 - Clean separation of metric ownership between Router, Node, and Cache Engine
 - HTTP request telemetry tracking total requests, 2xx/4xx/5xx status codes, and average latency
-- New `/metrics` JSON endpoints for both cache server nodes and the distributed router
+- Dedicated `/metrics` JSON endpoints for both cache server nodes and the distributed router
 - Context propagation (`http.NewRequestWithContext`) canceling outbound requests upon client disconnect
-- Multi-worker concurrent stress tests and Go benchmark suite in preparation for Phase 11
+- Multi-worker concurrent stress tests and Go benchmark suite
 
-### Phase 11 — Benchmarking & Performance Evaluation
+### 11. Empirical Benchmarking Framework
 - Comprehensive empirical evaluation of **LRU vs LFU vs 2Q** across operation types, capacities (100, 1,000, 10,000), and synthetic workloads
 - 5 deterministic synthetic workloads: Uniform Random, Zipfian / Hot-Key, Sequential Access, Scan / Pollution, and Repeated Hot Set
 - Multi-threaded parallel benchmarks (`b.RunParallel`) measuring lock contention and concurrent throughput across 12 worker goroutines
@@ -379,5 +421,6 @@ go test -bench="BenchmarkRouterProxy" -benchmem ./internal/router
 - **Layered Overhead**: Core cache engine lookups require **~25 ns**, while network and HTTP serialization account for **>99.9%** of total request latency (~90 µs direct node, ~207 µs router proxy).
 
 For full benchmark tables, visual comparison charts, and interview-level analyses, see [docs/benchmark-results.md](docs/benchmark-results.md).  
-For a beginner-to-advanced explanation of all architectural concepts and how they are implemented in our app, see [docs/architecture-concepts.md](docs/architecture-concepts.md).
+For a beginner-to-advanced explanation of all architectural concepts and how they are implemented in our app, see [docs/architecture-concepts.md](docs/architecture-concepts.md).  
+For the complete step-by-step UI testing walkthrough, see [docs/ui-testing-guide.md](docs/ui-testing-guide.md).
 
