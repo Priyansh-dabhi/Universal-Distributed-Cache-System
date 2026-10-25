@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="50%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#10b981" />
+    </linearGradient>
+    <radialGradient id="centerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#030712" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Background circle with dark fill -->
+  <rect width="64" height="64" rx="16" fill="#030712" />
+  
+  <!-- Subtle inner background border -->
+  <rect x="1" y="1" width="62" height="62" rx="15" fill="none" stroke="#1e293b" stroke-width="1.5" />
+
+  <!-- Center subtle glow -->
+  <circle cx="32" cy="32" r="22" fill="url(#centerGlow)" />
+
+  <!-- Consistent Hash Ring Circle -->
+  <circle cx="32" cy="32" r="20" stroke="url(#ringGrad)" stroke-width="3" stroke-dasharray="4 2" />
+
+  <!-- Virtual Node Tokens (3 nodes positioned along ring) -->
+  <!-- Node A (Top Right - Cyan) -->
+  <circle cx="46" cy="18" r="4.5" fill="#06b6d4" />
+  <circle cx="46" cy="18" r="7" stroke="#06b6d4" stroke-opacity="0.5" stroke-width="1.5" />
+
+  <!-- Node B (Bottom Right - Emerald) -->
+  <circle cx="46" cy="46" r="4.5" fill="#10b981" />
+  <circle cx="46" cy="46" r="7" stroke="#10b981" stroke-opacity="0.5" stroke-width="1.5" />
+
+  <!-- Node C (Left - Indigo/Violet) -->
+  <circle cx="16" cy="32" r="4.5" fill="#818cf8" />
+  <circle cx="16" cy="32" r="7" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1.5" />
+
+  <!-- Cache Key Data Packet in Center Routing Clockwise -->
+  <polygon points="32,24 38,32 32,40 26,32" fill="#38bdf8" />
+  <circle cx="32" cy="32" r="2" fill="#ffffff" />
+</svg>

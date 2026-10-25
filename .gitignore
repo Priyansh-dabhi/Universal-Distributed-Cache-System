@@ -37,6 +37,8 @@ Thumbs.db
 /build/
 /dist/
 /bin/
+ui/node_modules/
+ui/dist/
 
 # Logs
 *.log
